@@ -1,0 +1,81 @@
+FROM nvcr.io/nvidia/pytorch:22.12-py3 AS base
+
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+
+
+# System deps for: build tools + X11/GL/Vulkan + headless X (xvfb)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    wget \
+    unzip \
+    build-essential \
+    cmake \
+    ninja-build \
+    pkg-config \
+    libgl1 \
+    libegl1 \
+    libglvnd0 \
+    libglvnd-dev \
+    libx11-6 \
+    libxext6 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxinerama1 \
+    libxcursor1 \
+    libxxf86vm1 \
+    libsm6 \
+    libglib2.0-0 \
+    libvulkan1 \
+    vulkan-tools \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+# WAR for eglReleaseThread shutdown crash in libEGL_mesa.so.0
+# Prevents Mesa's EGL from being loaded, forcing NVIDIA's EGL
+RUN rm -f /usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0 \
+           /usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0.0.0 \
+           /usr/share/glvnd/egl_vendor.d/50_mesa.json
+
+FROM base AS isaacgym    
+
+# Isaac Gym
+COPY isaacgym /opt/isaacgym
+ENV ISAACGYM_PATH=/opt/isaacgym \
+    PYTHONPATH=/opt/isaacgym/python:${PYTHONPATH}
+
+# Install NVIDIA vendor configs for EGL and Vulkan
+COPY isaacgym/docker/10_nvidia.json /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+COPY isaacgym/docker/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json
+
+    # Install Isaac Gym python package
+RUN python -m pip install --no-cache-dir -U pip setuptools wheel && \
+    python -m pip install --no-cache-dir -e /opt/isaacgym/python
+
+
+FROM isaacgym as aerial_gym
+
+ARG AERIAL_GYM_REPO=https://github.com/ntnu-arl/aerial_gym_simulator.git
+ARG AERIAL_GYM_REF=main
+
+WORKDIR /app/aerial_gym
+RUN git clone --recursive ${AERIAL_GYM_REPO} aerial_gym_simulator && \
+    cd aerial_gym_simulator && \
+    git checkout ${AERIAL_GYM_REF}
+
+WORKDIR /app/aerial_gym/aerial_gym_simulator
+
+RUN pip install -e .
+
+# Fix OpenCV version incompatibility (cv2.dnn.DictValue issue)
+RUN pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python || true && \
+    pip install --no-cache-dir opencv-python==4.5.5.64
+
+CMD ["bash"]
+
