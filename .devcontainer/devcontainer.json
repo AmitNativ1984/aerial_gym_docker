@@ -1,0 +1,36 @@
+{
+	"name": "Aerial Gym",
+	"image": "localhost:5000/aerial-gym:latest",
+
+	"runArgs": [
+		"--gpus=all",
+		"--ipc=host",
+		"--ulimit", "memlock=-1",
+		"--ulimit", "stack=67108864",
+		"--device=/dev/dri",
+		"--network=host"
+	],
+
+	"containerEnv": {
+		"DISPLAY": "${localEnv:DISPLAY}",
+		"QT_X11_NO_MITSHM": "1",
+		"NVIDIA_VISIBLE_DEVICES": "all",
+		"NVIDIA_DRIVER_CAPABILITIES": "all"
+	},
+
+	"mounts": [
+		"source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+		"source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind,readonly"
+	],
+
+	"initializeCommand": "xhost +local:docker",
+
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-python.vscode-pylance"
+			]
+		}
+	}
+}
