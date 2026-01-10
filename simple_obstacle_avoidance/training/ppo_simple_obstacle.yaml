@@ -1,0 +1,87 @@
+params:
+  seed: 42                                        # Ensures reproducible results across runs
+  algo:
+    name: a2c_continuous                          # RL algorithm for continuous action spaces
+
+  model:
+    name: continuous_a2c_logstd                   # Outputs action mean + learned log std
+
+  load_checkpoint: False                          # Resume training from saved weights
+
+  network:
+    name: actor_critic                            # Policy and value share one network
+    separate: False                               # Single network for both actor/critic
+    space:
+      continuous:
+        mu_activation: None                       # Transform applied to action mean
+        sigma_activation: None                    # Transform applied to action std
+        mu_init:
+          name: default                           # Weight initialization for mean head
+        sigma_init:
+          name: const_initializer                 # Weight initialization for std head
+          val: 0                                  # Starting std (exp(0)=1 gives unit std)
+        fixed_sigma: True                         # Std independent of observation
+    mlp:
+      units: [256, 128, 64]                       # Neural network architecture
+      d2rl: False                                 # Dense residual connections
+      activation: elu                             # Non-linearity between layers
+      initializer:
+        name: default                             # How weights are initialized
+        scale: 2                                  # Multiplier for init variance
+
+  config:
+    name: simple_obstacle_avoidance               # Folder name for logs and checkpoints
+    env_name: simple_obstacle_avoidance_task      # Task identifier in registry
+    env_config:
+      num_envs: 1024                              # Environments simulated in parallel
+      headless: True                              # Disable visual rendering
+      use_warp: True                              # GPU-accelerated ray casting
+
+    # Reward scaling
+    reward_shaper:
+      scale_value: 0.1                            # Scales rewards to stabilize learning
+
+    # PPO settings
+    normalize_advantage: True                     # Zero-mean unit-var advantages
+    gamma: 0.99                                   # Future reward weighting
+    tau: 0.95                                     # Bias-variance tradeoff for GAE
+    ppo: True                                     # Use clipped surrogate objective
+
+    # Learning rate
+    learning_rate: 1e-4                           # Step size for optimizer
+    lr_schedule: adaptive                         # Adjusts LR during training
+    kl_threshold: 0.016                           # KL target for LR adaptation
+
+    # Training params
+    save_best_after: 10                           # Epochs before tracking best model
+    score_to_win: 100000                          # Early stopping threshold
+    grad_norm: 1.0                                # Prevents exploding gradients
+    entropy_coef: 0.001                           # Encourages exploration
+    truncate_grads: True                          # Apply gradient clipping
+    e_clip: 0.2                                   # Limits policy update magnitude
+    clip_value: False                             # Whether to clip value estimates
+
+    # Batch settings
+    num_actors: 1024                              # Data collectors (match num_envs)
+    horizon_length: 32                            # Timesteps before policy update
+    minibatch_size: 2048                          # Batch size for SGD updates
+    mini_epochs: 4                                # Passes over collected data
+
+    # Value function
+    critic_coef: 2                                # Importance of value loss
+    normalize_value: True                         # Normalizes value predictions
+    value_bootstrap: True                         # Use value at episode truncation
+
+    # Input normalization (important for VAE latents)
+    normalize_input: True                         # Standardizes observations online
+
+    # Other settings
+    bounds_loss_coef: 0.0001                      # Discourages extreme actions
+    max_epochs: 500                               # Training iterations limit
+    use_diagnostics: True                         # Extra logging for debugging
+
+    # Player settings (for inference/testing)
+    player:
+      render: True                                # Show visualization during eval
+      deterministic: True                         # Greedy action selection
+      games_num: 100000                           # Number of test episodes
