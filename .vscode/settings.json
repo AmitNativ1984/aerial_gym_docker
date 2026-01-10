@@ -1,0 +1,10 @@
+{
+    "python.analysis.extraPaths": [
+        "/app/aerial_gym/aerial_gym_simulator",
+        "/opt/isaacgym/python"
+    ],
+    "python.autoComplete.extraPaths": [
+        "/app/aerial_gym/aerial_gym_simulator",
+        "/opt/isaacgym/python"
+    ]
+}

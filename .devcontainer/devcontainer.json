@@ -20,7 +20,8 @@
 
 	"mounts": [
 		"source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
-		"source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind,readonly"
+		"source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind,readonly",
+		"source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
 	],
 
 	"initializeCommand": "xhost +local:docker",
@@ -32,5 +33,6 @@
 				"ms-python.vscode-pylance"
 			]
 		}
-	}
+	},
+	"postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash"
 }
