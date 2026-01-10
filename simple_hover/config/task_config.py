@@ -45,7 +45,6 @@ class task_config:
         "velocity_penalty": 0.1,            # Penalty for linear velocity
         "angular_velocity_penalty": 0.1,    # Penalty for angular velocity
         "jitter_penalty": 0.05,             # Penalty on  action jitter
-        "hover_reward": 1.0,                 # Reward for maintaining hover
         "collision_penalty": -100.0,          # Penalty for collision
     }
 
