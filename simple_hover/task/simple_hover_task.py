@@ -364,9 +364,6 @@ def compute_reward(
     action_diff = torch.norm(actions - prev_actions, dim=1)
     jitter_penalty = reward_params["jitter_penalty"] * action_diff
 
-    # Collision penalty
-    collision_penalty = reward_params["collision_penalty"] * crashes
-
     # Total reward (all penalties)
     rewards = -velocity_penalty - angular_velocity_penalty - jitter_penalty 
 
