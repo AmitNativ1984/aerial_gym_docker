@@ -17,7 +17,7 @@ import torch
 import numpy as np
 import gymnasium as gym
 from gym.spaces import Dict, Box
-
+from typing import Tuple, Dict as DictType
 logger = CustomLogger("simple_hover_task")
 
 
@@ -335,8 +335,8 @@ def compute_reward(
     actions: torch.Tensor,
     prev_actions: torch.Tensor,
     crashes: torch.Tensor,
-    reward_params: dict[str, torch.Tensor]
-) -> tuple[torch.Tensor, torch.Tensor]:
+    reward_params: DictType[str, torch.Tensor]
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute rewards for the hover task.
 

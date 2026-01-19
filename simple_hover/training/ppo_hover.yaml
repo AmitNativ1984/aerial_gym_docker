@@ -36,7 +36,7 @@ params:
     name: simple_hover                      # Experiment name for logging
     env_name: simple_hover_task             # Must match runner env registry name
     env_config:
-      num_envs: 512                         # Number of envs simulated in parallel
+      num_envs: 8192                         # Number of envs simulated in parallel
       headless: True                        # Disable visual rendering
       use_warp: False                       # No Camera - Disable GPU-accelerated ray casting
 
@@ -65,9 +65,9 @@ params:
     clip_value: False                       # Whether to clip value estimates
 
     # Batch settings
-    num_actors: 512                         # Match num_envs for simplicity
+    num_actors: 8192                         # Match num_envs for simplicity
     horizon_length: 256                     # Time steps per rollout. Longer horizon for stability tasks
-    minibatch_size: 1024                    # Batch size for SGD updates
+    minibatch_size: 2048                    # Batch size for SGD updates
     mini_epochs: 4                          # SGD passes per policy update
 
     # Value function
