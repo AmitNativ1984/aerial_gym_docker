@@ -57,6 +57,7 @@ params:
 
     # Training params
     save_best_after: 10                     # Epochs before tracking best model
+    save_frequency: 10                      # Save checkpoint every N epochs
     score_to_win: 100000                    # Early stopping threshold
     grad_norm: 1.0                          # Prevents exploding gradients
     entropy_coef: 0.001                     # Encourages exploration
