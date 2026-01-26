@@ -78,7 +78,8 @@ RUN pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python 
     pip install --no-cache-dir opencv-python==4.5.5.64
 
 RUN pip install \
-    loguru
+    loguru \
+    snntorch
 
 CMD ["bash"]
 
