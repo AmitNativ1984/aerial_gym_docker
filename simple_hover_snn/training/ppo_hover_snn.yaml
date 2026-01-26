@@ -1,0 +1,82 @@
+params:
+  seed: 42
+  algo:
+    name: a2c_continuous                    # PPO for continuous action spaces
+
+  model:
+    name: continuous_a2c_logstd             # Outputs action mean + learned log std
+
+  load_checkpoint: False
+
+
+  # SNN Network architecture
+  network:
+    name: snn_actor_critic                  # Custom SNN network (registered in runner.py)
+
+    # SNN-specific configuration
+    snn:
+      num_steps: 10                         # Number of SNN simulation timesteps per forward pass
+      hidden_dim: 64                        # Hidden layer dimension
+      beta: 0.999                           # Membrane potential decay factor (0 = no memory, 1 = perfect memory)
+      spike_grad: fast_sigmoid               # Surrogate gradient function for backprop (fast_sigmoid is more stable)
+      reset_mechanism: subtract             # Reset mechanism after spike: "subtract" or "zero"
+      reset_delay: False                    # Whether to delay reset by one timestep
+
+
+  config:
+    name: simple_hover_snn                  # Experiment name for logging
+    env_name: simple_hover_snn_task         # Must match runner env registry name
+    env_config:
+      num_envs: 4096                        # Number of envs simulated in parallel
+      headless: True                        # Disable visual rendering
+      use_warp: False                       # No Camera - Disable GPU-accelerated ray casting
+
+    # Reward Scaling
+    reward_shaper:
+      scale_value: 1.0                      # Scales rewards to stabilize learning - depends on reward coefficients
+
+    # PPO settings
+    normalize_advantage: True               # Zero-mean unit-var advantages
+    gamma: 0.99                             # Future reward weighting
+    tau: 0.95                               # Bias-variance tradeoff for GAE
+    ppo: True                               # Use clipped surrogate objective
+
+    # Learning rate
+    learning_rate: 3e-4                     # Standard learning rate
+    lr_schedule: adaptive                   # Adjusts LR during training
+    kl_threshold: 0.016                     # KL target for LR adaptation
+
+    # Training params
+    save_best_after: 10                     # Epochs before tracking best model
+    save_frequency: 10                      # Save checkpoint every N epochs
+    score_to_win: 100000                    # Early stopping threshold
+    grad_norm: 1.0                          # Standard gradient clipping
+    entropy_coef: 0.01                      # Encourages exploration
+    truncate_grads: True                    # Apply gradient clipping
+    e_clip: 0.2                             # Limits policy update magnitude
+    clip_value: False                       # Whether to clip value estimates
+
+    # Batch settings
+    num_actors: 8192                        # Match num_envs for simplicity
+    horizon_length: 256                     # Steps collected per env before update
+    minibatch_size: 4096                    # Samples per SGD step
+    mini_epochs: 4                          # SGD passes over data
+
+    # Value function
+    critic_coef: 2.0                        # Weighting of value loss term
+    normalize_value: True                   # Normalizes value predictions
+    value_bootstrap: True                   # Use value at episode truncation
+
+    # Input normalization
+    normalize_input: True                   # Normalize observations
+
+    # Other settings
+    bounds_loss_coef: 0.0001                # No action bounds loss needed
+    max_epochs: 500                         # Training iterations limit
+    use_diagnostics: True                   # Extra logging for debugging
+
+    # Player settings (for inference/testing)
+    player:
+      render: True                          # Show visualization during eval
+      deterministic: True                   # Greedy action selection
+      games_num: 100000                     # Number of test episodes
