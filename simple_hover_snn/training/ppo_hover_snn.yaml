@@ -57,7 +57,7 @@ params:
     clip_value: False                       # Whether to clip value estimates
 
     # Batch settings
-    num_actors: 8192                        # Match num_envs for simplicity
+    num_actors: 4096                        # Match num_envs for simplicity
     horizon_length: 256                     # Steps collected per env before update
     minibatch_size: 4096                    # Samples per SGD step
     mini_epochs: 4                          # SGD passes over data

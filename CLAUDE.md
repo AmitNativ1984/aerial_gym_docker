@@ -9,6 +9,10 @@ Docker-based environment for the Aerial Gym Simulator, built on NVIDIA Isaac Gym
 ## References
 When reasoning about the code, you MUST consult the following online documentation:
 
+- Local Aerial Gym Simulator:
+  /app/aerial_gym/aerial_gym_simulator/
+  (You can search this always)
+
 - Isaac Gym API:
   https://github.com/isaac-sim/IsaacGymEnvs 
   https://developer.nvidia.com/isaac-gym
