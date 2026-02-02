@@ -1,0 +1,123 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Train MLP",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_mlp.yaml",
+                "--train",
+                "--num_envs=4096",
+                "--headless=True"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Train MLP (with checkpoint)",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_mlp.yaml",
+                "--train",
+                "--num_envs=4096",
+                "--headless=True",
+                "--checkpoint=${input:mlpCheckpoint}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Train SNN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_snn.yaml",
+                "--train",
+                "--num_envs=4096",
+                "--headless=True"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Train SNN (with checkpoint)",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_snn.yaml",
+                "--train",
+                "--num_envs=4096",
+                "--headless=True",
+                "--checkpoint=${input:snnCheckpoint}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Play MLP",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_mlp.yaml",
+                "--play",
+                "--num_envs=64",
+                "--headless=False",
+                "--checkpoint=${input:mlpCheckpoint}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "test"
+        },
+        {
+            "label": "Play SNN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_snn.yaml",
+                "--play",
+                "--num_envs=64",
+                "--headless=False",
+                "--checkpoint=${input:snnCheckpoint}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "test"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "mlpCheckpoint",
+            "type": "promptString",
+            "description": "Path to MLP checkpoint (e.g., runs/simple_hover_mlp_xxx/nn/simple_hover_mlp.pth)"
+        },
+        {
+            "id": "snnCheckpoint",
+            "type": "promptString",
+            "description": "Path to SNN checkpoint (e.g., runs/simple_hover_snn_xxx/nn/simple_hover_snn.pth)"
+        }
+    ]
+}

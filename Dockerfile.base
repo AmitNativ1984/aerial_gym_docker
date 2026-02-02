@@ -77,6 +77,8 @@ RUN pip install -e .
 RUN pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python || true && \
     pip install --no-cache-dir opencv-python==4.5.5.64
 
+FROM aerial_gym AS dev
+
 RUN pip install \
     loguru \
     snntorch

@@ -6,7 +6,6 @@ Identical to simple_hover environment - the SNN is only
 a different neural network architecture, not a different environment.
 """
 
-from aerial_gym.config.asset_config.env_object_config import bottom_wall
 from aerial_gym import AERIAL_GYM_DIRECTORY
 import numpy as np
 
@@ -24,15 +23,15 @@ class SimpleHoverSNNEnvCfg:
                                 # these are the actions that are sent to environment entities
                                 # and some of them may be used to control various entities in the environment
                                 # e.g. motion of obstacles, etc.
-        env_spacing = 5.0 # 5.0 x 5.0 x 5.0 m spacing between envs
+        env_spacing = 1.0  # Matching position_setpoint_task (was 5.0)
 
         # Environment setup
-        create_ground_plane = True          # Create ground plane
+        create_ground_plane = False  # Matching position_setpoint_task (was True)
         reset_out_of_bounds = True
 
         # Physics simulation
-        num_physics_steps_per_env_step_mean = 5     # number of steps between camera renders mean
-        num_physics_steps_per_env_step_std = 0      # number of steps between camera renders std
+        num_physics_steps_per_env_step_mean = 1  # Matching position_setpoint_task (was 5)
+        num_physics_steps_per_env_step_std = 0
 
         # Rendering
         render_viewer_every_n_steps = 1
@@ -42,25 +41,21 @@ class SimpleHoverSNNEnvCfg:
 
         # Collision handling
         reset_on_collision = True
-        collision_force_threshold = 0.05  # Newtons
+        collision_force_threshold = 0.010  # Matching position_setpoint_task (was 0.05)
 
         sample_timestep_for_latency = True
         perturb_observations = True
         keep_same_env_for_num_episodes = 1
         write_to_sim_at_every_timestep = False
 
-        # Environment bounds
+        # Environment bounds (matching position_setpoint_task)
         e_s = env_spacing
-        lower_bound_min = [-e_s, -e_s, 0.0]  # X, Y, Z min (Z=0 is ground)
-        lower_bound_max = [-e_s, -e_s, 0.0]    # X, Y, Z max
-        upper_bound_min = [e_s, e_s, e_s]    # X, Y, Z min
-        upper_bound_max = [e_s, e_s, e_s]      # X, Y, Z max
+        lower_bound_min = [-e_s, -e_s, -e_s]  # Matching position_setpoint_task (was [-e_s, -e_s, 0.0])
+        lower_bound_max = [-e_s, -e_s, -e_s]  # Matching position_setpoint_task (was [-e_s, -e_s, 0.0])
+        upper_bound_min = [e_s, e_s, e_s]
+        upper_bound_max = [e_s, e_s, e_s]
 
     class env_config:
-        include_asset_type = {
-            "bottom_wall": True,
-        }
-
-        asset_type_to_dict_map = {
-            "bottom_wall": bottom_wall,
-        }
+        # No assets (matching position_setpoint_task - was bottom_wall)
+        include_asset_type = {}
+        asset_type_to_dict_map = {}

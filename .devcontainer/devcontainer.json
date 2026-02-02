@@ -1,6 +1,9 @@
 {
 	"name": "Aerial Gym",
-	"image": "localhost:5000/aerial-gym:latest",
+	"build": {
+		"dockerfile": "Dockerfile",
+		"context": ".."
+	},
 
 	"runArgs": [
 		"--gpus=all",

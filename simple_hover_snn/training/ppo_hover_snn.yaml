@@ -31,9 +31,13 @@ params:
       headless: True                        # Disable visual rendering
       use_warp: False                       # No Camera - Disable GPU-accelerated ray casting
 
+    # Reward parameters - defined in task_config.py (potential-based reward)
+    # R_total = -k_dist*dist² - k_angvel*||ω||²*proximity - k_jitter*||Δa|| + success_bonus
+    # See simple_hover_snn/config/task_config.py for actual values
+
     # Reward Scaling
     reward_shaper:
-      scale_value: 1.0                      # Scales rewards to stabilize learning - depends on reward coefficients
+      scale_value: 0.01                     # Scale rewards down for stable learning
 
     # PPO settings
     normalize_advantage: True               # Zero-mean unit-var advantages
@@ -41,10 +45,10 @@ params:
     tau: 0.95                               # Bias-variance tradeoff for GAE
     ppo: True                               # Use clipped surrogate objective
 
-    # Learning rate
-    learning_rate: 3e-4                     # Standard learning rate
-    lr_schedule: adaptive                   # Adjusts LR during training
-    kl_threshold: 0.016                     # KL target for LR adaptation
+    # Learning rate - Smooth decay to prevent overtraining
+    learning_rate: 3e-3                     # Initial learning rate (higher for SNN)
+    lr_schedule: linear                     # Linear decay from initial LR to 0
+    # Note: SNNs often need higher initial LR due to sparse gradients
 
     # Training params
     save_best_after: 10                     # Epochs before tracking best model
@@ -72,7 +76,7 @@ params:
 
     # Other settings
     bounds_loss_coef: 0.0001                # No action bounds loss needed
-    max_epochs: 500                         # Training iterations limit
+    max_epochs: 350                         # Training iterations limit
     use_diagnostics: True                   # Extra logging for debugging
 
     # Player settings (for inference/testing)

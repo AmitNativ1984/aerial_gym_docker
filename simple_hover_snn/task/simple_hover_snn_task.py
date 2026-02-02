@@ -13,7 +13,7 @@ neural network architecture used in training, not a different task.
 
 from aerial_gym.task.base_task import BaseTask
 from aerial_gym.sim.sim_builder import SimBuilder
-from aerial_gym.utils.math import ssa # For angle wrapping
+from aerial_gym.utils.math import quat_apply_inverse, quat_axis, get_euler_xyz
 from aerial_gym.utils.logging import CustomLogger
 
 import torch
@@ -141,7 +141,6 @@ class HoverSNNTask(BaseTask):
             dtype=np.float32
         )
 
-        self.action_transformation_function = self.task_config.action_transformation_function
 
         # Initialize task_obs dict
         self.task_obs = {
@@ -167,22 +166,43 @@ class HoverSNNTask(BaseTask):
         # Info dictionary for additional info logging
         self.infos = {}
 
-        # Target position bounds for randomization
-        self.target_position_min = torch.tensor(
-            self.task_config.target_position_min,
-            device=self.device
-        )
-        self.target_position_max = torch.tensor(
-            self.task_config.target_position_max,
-            device=self.device
-        )
-
-        # Initialize random target positions for all envs
+        # Fixed target position at origin for all envs (matching position_setpoint_task)
         self.target_position = torch.zeros(
             (self.num_envs, 3),
             device=self.device
         )
-        self._randomize_targets(torch.arange(self.num_envs, device=self.device))
+
+        # Success tracking: count consecutive steps within threshold
+        self.success_counter = torch.zeros(
+            self.num_envs,
+            device=self.device,
+            dtype=torch.float32  # Use float for JIT compatibility
+        )
+
+        # Track if success bonus was already awarded (to avoid double-counting)
+        self.success_achieved = torch.zeros(
+            self.num_envs,
+            device=self.device,
+            dtype=torch.float32  # Use float for JIT compatibility
+        )
+
+        # Cumulative success statistics (for monitoring)
+        self.total_successes = 0  # Total number of successful episode completions
+        self.total_episodes = 0   # Total number of episodes completed (success or failure)
+
+        # Episode step counter for each environment
+        self.episode_steps = torch.zeros(
+            self.num_envs,
+            device=self.device,
+            dtype=torch.int32
+        )
+
+        # Previous distance for progress reward (initialized to large value)
+        self.prev_dist = torch.ones(
+            self.num_envs,
+            device=self.device,
+            dtype=torch.float32
+        ) * 5.0  # Start with reasonable initial distance
 
         logger.info(
             f"Simple Hover SNN Task initialized with {self.num_envs} environments."
@@ -190,17 +210,6 @@ class HoverSNNTask(BaseTask):
             f" Action space dim: {self.task_config.action_space_dim}"
         )
 
-    def _randomize_targets(self, env_ids):
-        """
-        Randomize target positions for specified environments.
-        Targets are uniformly sampled within [target_position_min, target_position_max].
-        """
-        num_resets = len(env_ids)
-        random_values = torch.rand((num_resets, 3), device=self.device)
-        self.target_position[env_ids] = (
-            self.target_position_min +
-            random_values * (self.target_position_max - self.target_position_min)
-        )
 
     def close(self):
         """
@@ -219,19 +228,36 @@ class HoverSNNTask(BaseTask):
         """
         self.infos = {}
         self.sim_env.reset()
-        # Randomize targets for all environments on full reset
-        self._randomize_targets(torch.arange(self.num_envs, device=self.device))
+        # Target remains at origin [0, 0, 0] (matching position_setpoint_task)
+        self.target_position[:, 0:3] = 0.0
+        # Reset success tracking for all environments
+        self.success_counter[:] = 0
+        self.success_achieved[:] = 0
+        # Reset episode step counter
+        self.episode_steps[:] = 0
+        # Initialize prev_dist to actual distance (avoid spurious progress reward on first step)
+        self.obs_dict = self.sim_env.get_obs()
+        robot_position = self.obs_dict["robot_position"]
+        self.prev_dist = torch.norm(robot_position - self.target_position, dim=1)
         return self.get_return_tuple()
 
     def reset_idx(self, env_ids):
         """
         Reset specific environments by their IDs.
-        In this task - reset robot state and randomize target.
+        In this task - reset robot state, target stays at origin.
         """
         self.infos = {}
         self.sim_env.reset_idx(env_ids)
-        # Randomize targets for reset environments
-        self._randomize_targets(env_ids)
+        # Target remains at origin [0, 0, 0] (matching position_setpoint_task)
+        self.target_position[env_ids, 0:3] = 0.0
+        # Reset success tracking for reset environments
+        self.success_counter[env_ids] = 0
+        self.success_achieved[env_ids] = 0
+        # Initialize prev_dist to actual distance for reset envs (avoid spurious progress reward)
+        robot_position = self.obs_dict["robot_position"]
+        self.prev_dist[env_ids] = torch.norm(
+            robot_position[env_ids] - self.target_position[env_ids], dim=1
+        )
         return
 
     def render(self):
@@ -261,25 +287,86 @@ class HoverSNNTask(BaseTask):
         self.prev_actions[:] = self.actions
         self.actions = actions
 
-        # Run the actions in the simulation environment
-        transformed_actions = self.action_transformation_function(self.actions)
-        self.sim_env.step(transformed_actions)
+        # Increment episode step counter for all active environments
+        self.episode_steps += 1
+
+        # Run the actions in the simulation environment (direct pass, no transformation)
+        self.sim_env.step(self.actions)
 
         # Calculate the rewards and check for terminations/truncations
         self.rewards[:], self.terminations[:] = self.compute_rewards_and_crashes(self.obs_dict)
 
+        # Check for success: hovering within threshold
+        position = self.obs_dict["robot_position"]
+        pos_error = torch.norm(position - self.target_position, dim=1)
+        within_threshold = pos_error < self.task_config.success_threshold
+
+        # Increment counter if within threshold, reset otherwise
+        self.success_counter = torch.where(
+            within_threshold,
+            self.success_counter + 1,
+            torch.zeros_like(self.success_counter)
+        )
+
+        # Mark as truncated (success) if held position for required steps
+        # Note: We use truncations instead of terminations because
+        # post_reward_calculation_step() only checks truncations for reset
+        success = self.success_counter >= self.task_config.success_hold_steps
+        num_successes = success.sum().item()
+        self.truncations[:] = torch.where(
+            success,
+            torch.ones_like(self.truncations),
+            self.truncations
+        )
+
         if self.task_config.return_state_before_reset:
             return_tuple = self.get_return_tuple()
 
+        # Also truncate if episode length exceeded (timeout = failure)
+        timeout = self.sim_env.sim_steps > self.task_config.episode_len_steps
+        num_timeouts = timeout.sum().item()
         self.truncations[:] = torch.where(
-            self.sim_env.sim_steps > self.task_config.episode_len_steps, 1, 0
+            timeout, 1, self.truncations
         )
+
+        # Track cumulative statistics before reset
+        # Count episodes that will be reset (either success, crash, or timeout)
+        will_reset = (self.terminations | self.truncations).bool()
+        num_resets = will_reset.sum().item()
+
+        # Track average episode length for successful episodes
+        avg_success_steps = 0.0
+        if num_successes > 0:
+            # Get episode lengths for successful environments
+            success_mask = success.bool()
+            successful_episode_lengths = self.episode_steps[success_mask]
+            avg_success_steps = successful_episode_lengths.float().mean().item()
+
+        if num_resets > 0:
+            self.total_episodes += num_resets
+            self.total_successes += num_successes
 
         reset_envs = self.sim_env.post_reward_calculation_step()
         if len(reset_envs) > 0:
+            # Reset episode step counter for reset environments
+            self.episode_steps[reset_envs] = 0
             self.reset_idx(reset_envs)
 
-        self.infos = {}  # self.obs_dict["info"]
+        # Calculate success rate (percentage of completed episodes that were successful)
+        success_rate = (self.total_successes / self.total_episodes * 100.0) if self.total_episodes > 0 else 0.0
+
+        # Log metrics for tensorboard (IsaacAlgoObserver logs scalar values from infos)
+        self.infos = {
+            # Instantaneous metrics (per step)
+            "successes": num_successes,           # Number of successful completions this step
+            "timeouts": num_timeouts,             # Number of timeouts this step
+            "avg_success_episode_length": avg_success_steps,  # Avg steps to success (for successes this step)
+
+            # Cumulative metrics (over entire training run)
+            "total_successes": self.total_successes,  # Total successful completions
+            "total_episodes": self.total_episodes,    # Total episodes completed
+            "success_rate": success_rate,             # Success rate percentage (successes/total_episodes)
+        }
 
         if not self.task_config.return_state_before_reset:
             return_tuple = self.get_return_tuple()
@@ -298,26 +385,27 @@ class HoverSNNTask(BaseTask):
 
     def process_obs_for_task(self):
         """
-        Build 9D observation vector
+        Build 13D observation vector (matching position_setpoint_task)
 
-        [0:3]   Position error to target (normalized by 5m)
-        [3:6]   Body Linear Velocity (vx, vy, vz)
-        [6:9]   Euler angles: roll, pitch, yaw (normalized)
+        [0:3]   Position error: target - robot_position (NO normalization)
+        [3:7]   Robot orientation (quaternion)
+        [7:10]  Body Linear Velocity (vx, vy, vz) (NO normalization)
+        [10:13] Body Angular Velocity (wx, wy, wz)
         """
 
-        # Position error (current position - target)
-        position = self.obs_dict["robot_position"]
-        position_error = position - self.target_position
-        self.task_obs["observations"][:, 0:3] = position_error / 5.0  # Normalize by 5m
-
-        # Velocity (body frame)
-        self.task_obs["observations"][:, 3:6] = (
-            self.obs_dict["robot_body_linvel"] / 5.0   # Normalize by max 5 m/s
+        # Position error (target - robot_position)
+        self.task_obs["observations"][:, 0:3] = (
+            self.target_position - self.obs_dict["robot_position"]
         )
 
-        # Euler angles (roll, pitch, yaw)
-        euler_angles = ssa(self.obs_dict["robot_euler_angles"])
-        self.task_obs["observations"][:, 6:9] = euler_angles / torch.pi  # Normalize by pi
+        # Robot orientation (quaternion)
+        self.task_obs["observations"][:, 3:7] = self.obs_dict["robot_orientation"]
+
+        # Body linear velocity (NO normalization)
+        self.task_obs["observations"][:, 7:10] = self.obs_dict["robot_body_linvel"]
+
+        # Body angular velocity
+        self.task_obs["observations"][:, 10:13] = self.obs_dict["robot_body_angvel"]
 
         self.task_obs["rewards"] = self.rewards
         self.task_obs["terminations"] = self.terminations
@@ -327,14 +415,13 @@ class HoverSNNTask(BaseTask):
         """
         Compute rewards and check for crashes.
 
-        Rewards:
-        - Exponential position reward: exp(-decay * ||pos_error||)
-        - Hover bonus when ||pos_error|| < threshold
-        - Small penalties for angular velocity and action jitter
-        - Large penalty for collision
-
-        Crashes:
-        - Based on obs_dict["crashes"]
+        Potential-based reward structure:
+        1. Progress reward: positive for moving toward goal
+        2. Gated tilt penalty: penalize pitch/roll deviation when near goal
+        3. Gated angular velocity penalty: penalize rotation when near goal
+        4. Action jitter penalty: penalize rapid action changes
+        5. Hover bonus: reward for being near goal with low velocity
+        6. Crash penalty: large negative for crashes
 
         Args:
             obs_dict: Dictionary of observations from the environment
@@ -343,81 +430,158 @@ class HoverSNNTask(BaseTask):
             rewards: Tensor of shape (num_envs,) with computed rewards
             crashes: Tensor of shape (num_envs,) with crash flags (1 if crashed, 0 otherwise)
         """
+        robot_position = obs_dict["robot_position"]
+        target_position = self.target_position
+        robot_vehicle_orientation = obs_dict["robot_vehicle_orientation"]
+        robot_linvel = obs_dict["robot_body_linvel"]
+        robot_angvel = obs_dict["robot_body_angvel"]
 
-        position_error = obs_dict["robot_position"] - self.target_position
-        angular_velocity = obs_dict["robot_body_angvel"]
-        crashes = obs_dict["crashes"]
+        pos_error_vehicle_frame = quat_apply_inverse(
+            robot_vehicle_orientation, (target_position - robot_position)
+        )
 
-        return compute_reward(
-            position_error,
-            angular_velocity,
+        rewards, crashes, self.success_counter, self.prev_dist = compute_reward(
+            pos_error_vehicle_frame,
+            robot_linvel,
+            robot_angvel,
+            robot_vehicle_orientation,
+            obs_dict["crashes"],
             self.actions,
             self.prev_actions,
-            crashes,
-            self.task_config.reward_parameters
+            self.success_counter,
+            self.prev_dist,
+            self.task_config.reward_parameters,
         )
+        return rewards, crashes
 
 
 @torch.jit.script
 def compute_reward(
-    position_error: torch.Tensor,
-    angular_velocity: torch.Tensor,
-    actions: torch.Tensor,
-    prev_actions: torch.Tensor,
-    crashes: torch.Tensor,
-    reward_params: DictType[str, torch.Tensor]
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    pos_error,
+    robot_linvel,
+    robot_angvel,
+    robot_orientation,
+    crashes,
+    current_action,
+    prev_actions,
+    success_counter,
+    prev_dist,
+    parameter_dict,
+):
+    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]) -> Tuple[Tensor, Tensor, Tensor, Tensor]
     """
-    Compute rewards for the hover task.
+    Potential-based reward for hover task.
 
-    Rewards:
-    - Exponential position reward: exp(-decay * ||pos_error||)
-    - Hover bonus when ||pos_error|| < threshold
-    - Small penalties for angular velocity and action jitter
-    - Large penalty for collision
+    Components:
+    0. Distance penalty: -k_dist * curr_dist
+       - Constant pressure to get closer to goal
+    1. Progress reward: k_progress * (prev_dist - curr_dist)
+       - Positive when moving toward goal, negative when moving away
+    2. Gated tilt penalty: -k_tilt * g(dist) * sqrt(pitch^2 + roll^2)
+       - g(dist) = sigmoid((gate_center - dist) / gate_width)
+       - Penalizes attitude deviation when near goal
+    3. Gated angular velocity penalty: -k_angvel * g(dist) * ||angvel||
+       - Penalizes rotation when near goal
+    4. Action jitter penalty: -k_jitter * ||action_diff||
+    5. Hover bonus: +k_hover * exp(-||vel|| / vel_scale) when dist < threshold
+       - Rewards being near goal with low velocity (exponential decay, no hard cutoff)
+    6. Crash penalty: -k_crash (one-time)
 
-    Args:
-        position_error: Tensor of shape (num_envs, 3) with position error to target
-        angular_velocity: Tensor of shape (num_envs, 3) with body angular velocities
-        actions: Tensor of shape (num_envs, action_dim) with current actions
-        prev_actions: Tensor of shape (num_envs, action_dim) with previous actions
-        crashes: Tensor of shape (num_envs,) with crash flags (1 if crashed, 0 otherwise)
-        reward_params: Dictionary with reward parameters
-
-    Returns:
-        rewards: Tensor of shape (num_envs,) with computed rewards
-        crashes: Tensor of shape (num_envs,) with crash flags (1 if crashed, 0 otherwise)
+    Optimal behavior: approach goal quickly, then stabilize with level attitude,
+    minimal rotation, minimal velocity, and smooth control.
     """
+    # Extract parameters
+    k_dist = parameter_dict["k_dist"][0]
+    k_progress = parameter_dict["k_progress"][0]
+    gate_midpoint = parameter_dict["gate_center"][0]
+    gate_steepness = parameter_dict["gate_width"][0]
+    k_jitter = parameter_dict["k_jitter"][0]
+    k_tilt = parameter_dict["k_tilt"][0]
+    k_angvel = parameter_dict["k_angvel"][0]
+    k_hover = parameter_dict["k_hover"][0]
+    threshold_hover = parameter_dict["threshold_hover"][0]
+    vel_scale_hover = parameter_dict["vel_scale_hover"][0]
+    k_crash = parameter_dict["k_crash"][0]
+    max_distance = parameter_dict["max_distance"][0]
 
-    pos_error_magnitude = torch.norm(position_error, dim=1)
+    # Current distance to target
+    curr_dist = torch.norm(pos_error, dim=1)
 
-    # Exponential position reward (1.0 at target, decays with distance)
-    pos_reward = reward_params["pos_reward_scale"] * torch.exp(
-        -reward_params["pos_reward_decay"] * pos_error_magnitude
+    # ============================================================
+    # CRASH CHECK (distance beyond max)
+    # ============================================================
+    crashes = torch.where(curr_dist > max_distance, torch.ones_like(crashes), crashes)
+
+    # ============================================================
+    # GATING FUNCTION (SIGMOID)
+    # ============================================================
+    sigma = torch.sigmoid((gate_midpoint - curr_dist) / gate_steepness)
+    
+    # ============================================================
+    # 1. PROGRESS REWARD (positive for approaching goal)
+    # ============================================================
+    progress = prev_dist - curr_dist  # Positive when getting closer
+    R_progress = k_progress * progress  # Positive reward
+
+    # ============================================================
+    # 2. TILT PENALTY (negative for pitch/roll deviation)
+    # ============================================================
+    # Extract roll, pitch, yaw from quaternion using built-in function
+    roll, pitch, yaw = get_euler_xyz(robot_orientation)
+
+    # Tilt magnitude: sqrt(pitch^2 + roll^2)
+    tilt_magnitude = torch.sqrt(pitch ** 2 + roll ** 2)
+    R_tilt = k_tilt * sigma * tilt_magnitude  # Negative penalty (more negative for stronger tilt)
+
+    # ============================================================
+    # 3. ANGULAR VELOCITY PENALTY (negative for rotation)
+    # ============================================================
+    angvel_magnitude = torch.norm(robot_angvel, dim=1)
+    R_angvel = k_angvel * sigma * angvel_magnitude  # Negative penalty (more negative for higher angular velocity)
+
+    # ============================================================
+    # 4. ACTION JITTER PENALTY (negative for rapid action changes)
+    # ============================================================
+    action_diff = torch.norm(current_action - prev_actions, dim=1)
+    R_jitter = k_jitter * action_diff  # Negative penalty (more negative for stronger jitter)
+
+    # ============================================================
+    # 5. HOVER BONUS (positive for stable hovering near goal)
+    # ============================================================
+  
+    # Update success counter for episode termination tracking
+    success_counter = torch.where(
+        curr_dist < threshold_hover,
+        success_counter + 1,
+        torch.zeros_like(success_counter)
     )
 
-    # Hover bonus when close to target
-    hover_bonus = torch.where(
-        pos_error_magnitude < reward_params["hover_threshold"],
-        reward_params["hover_bonus"],
-        torch.zeros_like(pos_error_magnitude)
+    # Compute velocity magnitude
+    vel_magnitude = torch.norm(robot_linvel, dim=1)
+
+    # Velocity bonus: exponential decay with velocity
+    # vel=0 → bonus=1.0, vel=vel_scale → bonus≈0.37, approaches 0 asymptotically
+    vel_bonus_scale = torch.exp(-vel_magnitude / vel_scale_hover)
+
+    # Hover bonus: only active when within distance threshold, scaled by velocity
+    R_hover = torch.where(
+        curr_dist < threshold_hover,
+        k_hover * vel_bonus_scale,  # Positive reward (more positive when stationary)
+        torch.zeros_like(curr_dist)
     )
 
-    # Small penalties
-    ang_vel_magnitude = torch.norm(angular_velocity, dim=1)
-    angular_velocity_penalty = reward_params["angular_velocity_penalty"] * ang_vel_magnitude
-
-    action_diff = torch.norm(actions - prev_actions, dim=1)
-    jitter_penalty = reward_params["jitter_penalty"] * action_diff
-
-    # Total reward
-    rewards = pos_reward + hover_bonus - angular_velocity_penalty - jitter_penalty
-
-    # Collision penalty
-    rewards = torch.where(
-        condition=crashes > 0,
-        input=reward_params["collision_penalty"] * torch.ones_like(rewards),
-        other=rewards
+    # ============================================================
+    # TOTAL REWARD: R_total = -k_dist*dist + R_progress - R_tilt - R_angvel - R_jitter + R_hover
+    # ============================================================
+    # If crashed: only crash penalty
+    # Otherwise: sum all reward components
+    R_total = torch.where(
+        crashes > 0.0,
+        -k_crash * torch.ones_like(curr_dist),
+        -k_dist * curr_dist + R_progress - R_tilt - R_angvel - R_jitter + R_hover
     )
 
-    return rewards, crashes
+    # Update prev_dist for next step (return as output)
+    new_prev_dist = curr_dist.clone()
+
+    return R_total, crashes, success_counter, new_prev_dist

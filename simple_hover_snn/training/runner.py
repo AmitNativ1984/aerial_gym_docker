@@ -13,7 +13,9 @@ import argparse
 import os
 import sys
 import yaml
+import shutil
 import numpy as np
+from datetime import datetime
 sys.path.insert(0, "/workspaces/aerial_gym_docker")
 import wandb
 import torch
@@ -21,7 +23,9 @@ import gym
 from gym import spaces
 from loguru import logger
 from rl_games.common import env_configurations, vecenv
+from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
+from rl_games.common import a2c_common
 
 from aerial_gym.registry.task_registry import task_registry
 from aerial_gym.registry.env_registry import env_config_registry
@@ -36,7 +40,7 @@ from simple_hover_snn.config.env_config import SimpleHoverSNNEnvCfg
 from simple_hover_snn.config.robot_config import CustomQuadWithImuSNNCfg
 
 from rl_games.algos_torch import model_builder
-from simple_hover_snn.networks import SNNNetworkBuilder
+from simple_hover_snn.networks import SNNNetworkBuilder, MLPNetworkBuilder
 
 # =============================================================================
 # Register Custom Environment and Task
@@ -56,8 +60,57 @@ task_registry.register_task("simple_hover_snn_task",
                        HoverSNNTask,
                        task_config)
 
-# Register network
+# Register both network types (choose via YAML config)
 model_builder.register_network('snn_actor_critic', SNNNetworkBuilder)
+model_builder.register_network('mlp_actor_critic', MLPNetworkBuilder)
+
+# =============================================================================
+# Monkey Patch: Simplify Checkpoint Naming (Remove Reward Suffix)
+# =============================================================================
+
+# Store the original train_epoch method
+_original_train_epoch = a2c_common.DiscreteA2CBase.train_epoch if hasattr(a2c_common, 'DiscreteA2CBase') else None
+_original_continuous_train_epoch = a2c_common.ContinuousA2CBase.train_epoch if hasattr(a2c_common, 'ContinuousA2CBase') else None
+
+def _patch_checkpoint_naming():
+    """
+    Monkey patch to simplify checkpoint naming by removing reward suffix.
+    Original: {name}_ep_{epoch}_rew_{reward}.pth
+    New: {name}_ep_{epoch}.pth
+    """
+    import types
+
+    # Patch the checkpoint name generation in the train method
+    original_train = a2c_common.A2CBase.train
+
+    def patched_train(self):
+        # Store original save method
+        original_save_method = self.save
+
+        def patched_save(filename):
+            # Simplify checkpoint name by removing reward suffix
+            # Replace pattern: {name}_ep_{num}_rew_{reward}.pth with {name}_ep_{num}.pth
+            # Match _rew_ followed by integer or float (with optional negative sign)
+            import re
+            simplified_filename = re.sub(r'_rew_-?\d+(?:\.\d+)?', '', filename)
+            return original_save_method(simplified_filename)
+
+        # Temporarily replace save method
+        self.save = patched_save
+
+        try:
+            # Call original train
+            result = original_train(self)
+        finally:
+            # Restore original save method
+            self.save = original_save_method
+
+        return result
+
+    a2c_common.A2CBase.train = patched_train
+
+# Apply the patch
+_patch_checkpoint_naming()
 
 
 # =============================================================================
@@ -124,11 +177,24 @@ class AERIALRLGPUEnv(vecenv.IVecEnv):
         return info
 
 
+# Custom env creator that handles reward_params separately
+def create_hover_task(**kwargs):
+    """Create task, extracting reward_params to pass directly to HoverSNNTask."""
+    reward_params = kwargs.pop("reward_params", None)
+    task = task_registry.make_task("simple_hover_snn_task", **kwargs)
+    # If reward_params provided, override the task's reward parameters
+    if reward_params is not None:
+        for key, value in reward_params.items():
+            if key in task.task_config.reward_parameters:
+                task.task_config.reward_parameters[key] = torch.tensor([value], device=task.device)
+                logger.info(f"Reward param override: {key} = {value}")
+    return task
+
 # Register task with rl_games env_configurations
 env_configurations.register(
     "simple_hover_snn_task",
     {
-        "env_creator": lambda **kwargs: task_registry.make_task("simple_hover_snn_task", **kwargs),
+        "env_creator": create_hover_task,
         "vecenv_type": "AERIAL-RLGPU-SNN",
     },
 )
@@ -154,7 +220,7 @@ def get_args():
         {"name": "--num_envs", "type": int, "default": 1024, "help": "Num envs"},
         {"name": "--headless", "type": lambda x: bool(strtobool(x)), "default": "False", "help": "Headless mode"},
         {"name": "--use_warp", "type": lambda x: bool(strtobool(x)), "default": "False", "help": "Use warp"},
-        {"name": "--experiment_name", "type": str, "default": "simple_hover_snn", "help": "Experiment name"},
+        {"name": "--experiment_name", "type": str, "default": None, "help": "Experiment name (defaults to config name)"},
         {"name": "--task", "type": str, "default": "simple_hover_snn_task", "help": "Task name"},
         {"name": "--track", "action": "store_true", "help": "Track with Weights and Biases"},
         {"name": "--wandb-project-name", "type": str, "default": "aerial_gym_snn", "help": "Wandb project name"},
@@ -170,10 +236,16 @@ def get_args():
 def update_config(config, args):
     """Update training config with CLI arguments."""
     config["params"]["config"]["env_name"] = args["task"]
-    config["params"]["config"]["name"] = args["experiment_name"]
+    # Use experiment name from config if not provided via CLI
+    if args["experiment_name"] is not None:
+        config["params"]["config"]["name"] = args["experiment_name"]
     config["params"]["config"]["env_config"]["headless"] = args["headless"]
     config["params"]["config"]["env_config"]["num_envs"] = args["num_envs"]
     config["params"]["config"]["env_config"]["use_warp"] = args["use_warp"]
+
+    # Pass reward parameters from YAML to env_config (will be picked up by task)
+    if "reward_params" in config["params"]["config"]:
+        config["params"]["config"]["env_config"]["reward_params"] = config["params"]["config"]["reward_params"]
 
     if args["num_envs"] > 0:
         config["params"]["config"]["num_actors"] = args["num_envs"]
@@ -208,8 +280,8 @@ if __name__ == "__main__":
         config = yaml.safe_load(stream)
         config = update_config(config, args)
 
-        # Initialize rl_games runner
-        runner = Runner()
+        # Initialize rl_games runner with IsaacAlgoObserver for custom metric logging
+        runner = Runner(algo_observer=IsaacAlgoObserver())
         try:
             runner.load(config)
         except yaml.YAMLError as exc:
@@ -230,6 +302,24 @@ if __name__ == "__main__":
 
     # Run training or playing
     logger.info("Starting training..." if args.get("train") else "Starting playback...")
+
+    # Patch to save config when experiment directory is created
+    if args.get("train"):
+        import glob
+        from rl_games.common.a2c_common import A2CBase
+        original_init_tensors = A2CBase.init_tensors
+
+        def patched_init_tensors(self):
+            result = original_init_tensors(self)
+            # Save config to experiment directory
+            config_save_path = os.path.join(self.experiment_dir, "config.yaml")
+            with open(config_save_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            logger.info(f"Saved config to: {config_save_path}")
+            return result
+
+        A2CBase.init_tensors = patched_init_tensors
+
     runner.run(args)
 
     # Finish wandb tracking

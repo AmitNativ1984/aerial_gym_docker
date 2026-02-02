@@ -80,11 +80,13 @@ class SNNActorCriticNetwork(nn.Module):
                                      spike_grad=spike_grad)
 
         # Action head: converts the snn latent spikes (hidden_dim) to action mean (action_dim)
+        # Output order MUST match LeeAttitudeController: [thrust, roll, pitch, yaw_rate]
         self.action_head = nn.Linear(in_features=snn_config["hidden_dim"], out_features=action_dim)
 
         # Sigma: learnable parameter, one per action
-        # Initialized to 0, so initial std = exp(0) = 1.0
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
+        # Initialized to -0.5, so initial std = exp(-0.5) ≈ 0.6
+        # Lower std prevents excessive clipping with tanh output
+        self.log_std = nn.Parameter(torch.full((action_dim,), -0.5))
 
         # Value Network (also SNN)
         self.value_fc1 = nn.Linear(in_features=input_dim, out_features=snn_config["hidden_dim"])
@@ -127,14 +129,14 @@ class SNNActorCriticNetwork(nn.Module):
         x = obs_dict["obs"]
 
         # Initialize membrane potentials for policy SNN:
-        policy_mem1 = self.policy_lif1.reset_mem()
-        policy_mem2 = self.policy_lif2.reset_mem()
-        policy_mem3 = self.policy_lif3.reset_mem()
+        policy_mem1 = self.policy_lif1.init_leaky()
+        policy_mem2 = self.policy_lif2.init_leaky()
+        policy_mem3 = self.policy_lif3.init_leaky()
 
         # Initialize membrane potentials for value SNN:
-        value_mem1 = self.value_lif1.reset_mem()
-        value_mem2 = self.value_lif2.reset_mem()
-        value_mem3 = self.value_lif3.reset_mem()
+        value_mem1 = self.value_lif1.init_leaky()
+        value_mem2 = self.value_lif2.init_leaky()
+        value_mem3 = self.value_lif3.init_leaky()
 
         spikes_policy_acc = []
         spikes_value_acc = []
@@ -174,7 +176,11 @@ class SNNActorCriticNetwork(nn.Module):
         policy_mean_spikes = torch.stack(spikes_policy_acc).mean(dim=0)
         value_mean_spikes = torch.stack(spikes_value_acc).mean(dim=0)
 
-        mu = self.action_head(policy_mean_spikes)   # (batch, action_dim)
+        # Action output order: [thrust, roll, pitch, yaw_rate], all in [-1, 1]
+        # This matches LeeAttitudeController expected format directly (no transformation needed)
+        # Linear rescaling: map average spike rate [0, 1] to action space [-1, 1]
+        # Spike rate 0.0 → -1.0 (min action), 0.5 → 0.0 (neutral), 1.0 → +1.0 (max action)
+        mu = 2.0 * self.action_head(policy_mean_spikes) - 1.0  # (batch, action_dim) in [-1, 1]
         log_std = mu * 0 + self.log_std             # (batch, action_dim)
         value = self.value_head(value_mean_spikes)  # (batch, 1)
         states = None
