@@ -2,8 +2,15 @@
 	"name": "Aerial Gym",
 	"build": {
 		"dockerfile": "Dockerfile",
-		"context": ".."
+		"context": "..",
+		"args": {
+			"USERNAME": "${localEnv:USER:devuser}",
+			"USER_UID": "${localEnv:UID:1000}",
+			"USER_GID": "${localEnv:GID:1000}"
+		}
 	},
+
+	"remoteUser": "${localEnv:USER:devuser}",
 
 	"runArgs": [
 		"--gpus=all",
@@ -23,8 +30,9 @@
 
 	"mounts": [
 		"source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
-		"source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind,readonly",
-		"source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
+		"source=${localEnv:HOME}/.Xauthority,target=/home/${localEnv:USER}/.Xauthority,type=bind,readonly",
+		"source=${localEnv:HOME}/.claude,target=${localEnv:HOME}/.claude,type=bind",
+		"source=${localEnv:HOME}/DATA,target=${localEnv:HOME}/DATA,type=bind"
 	],
 
 	"initializeCommand": "xhost +local:docker",
@@ -37,5 +45,5 @@
 			]
 		}
 	},
-	"postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash"
+	"postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash && echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc && source ~/.bashrc"
 }
