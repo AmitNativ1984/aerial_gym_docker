@@ -33,7 +33,7 @@ class SNNActorCriticNetwork(nn.Module):
         - input_dim (int): Dimension of the input observation space.
         - action_dim (int): Dimension of the action space.
         - snn_config (dict): Configuration parameters for the SNN architecture, with the following keys:
-            - hidden_dim (int): hidden layers dim. (currently all the same).
+            - hidden_dims (list): Hidden layer dimensions (e.g., [256, 128, 64]).
             - spike_grad (str): Type of surrogate gradient function to use.
             - learn_beta (bool): Whether to learn the membrane potential decay factor.
             - beta (float): Initial value for the membrane potential decay factor.
@@ -45,6 +45,15 @@ class SNNActorCriticNetwork(nn.Module):
         """
 
         super(SNNActorCriticNetwork, self).__init__()
+
+        # Extract hidden dimensions (support both old "hidden_dim" and new "hidden_dims")
+        if "hidden_dims" in snn_config:
+            hidden_dims = snn_config["hidden_dims"]
+        elif "hidden_dim" in snn_config:
+            # Backward compatibility: convert single hidden_dim to list of 3 identical values
+            hidden_dims = [snn_config["hidden_dim"]] * 3
+        else:
+            hidden_dims = [256, 128, 64]  # Default to match MLP
 
         # Select surrogate gradient function
         if snn_config["spike_grad"] == "sigmoid":
@@ -61,52 +70,51 @@ class SNNActorCriticNetwork(nn.Module):
 
         self.features_extractor = nn.Flatten()
 
-        # Policy Network
-        self.policy_fc1 = nn.Linear(in_features=input_dim, out_features=snn_config["hidden_dim"])
+        # Policy Network (Actor) - Dynamic architecture based on hidden_dims
+        self.policy_fc1 = nn.Linear(in_features=input_dim, out_features=hidden_dims[0])
         self.policy_lif1 = snn.Leaky(beta=snn_config["beta"],
                                      reset_mechanism=snn_config["reset_mechanism"],
                                      reset_delay=snn_config["reset_delay"],
                                      spike_grad=spike_grad
                                      )
-        self.policy_fc2 = nn.Linear(in_features=snn_config["hidden_dim"], out_features=snn_config["hidden_dim"])
+        self.policy_fc2 = nn.Linear(in_features=hidden_dims[0], out_features=hidden_dims[1])
         self.policy_lif2 = snn.Leaky(beta=snn_config["beta"],
                                      reset_mechanism=snn_config["reset_mechanism"],
                                      reset_delay=snn_config["reset_delay"],
                                      spike_grad=spike_grad)
-        self.policy_fc3 = nn.Linear(in_features=snn_config["hidden_dim"], out_features=snn_config["hidden_dim"])
+        self.policy_fc3 = nn.Linear(in_features=hidden_dims[1], out_features=hidden_dims[2])
         self.policy_lif3 = snn.Leaky(beta=snn_config["beta"],
                                      reset_mechanism=snn_config["reset_mechanism"],
                                      reset_delay=snn_config["reset_delay"],
                                      spike_grad=spike_grad)
 
-        # Action head: converts the snn latent spikes (hidden_dim) to action mean (action_dim)
+        # Action head: converts the snn latent spikes (last hidden_dim) to action mean (action_dim)
         # Output order MUST match LeeAttitudeController: [thrust, roll, pitch, yaw_rate]
-        self.action_head = nn.Linear(in_features=snn_config["hidden_dim"], out_features=action_dim)
+        self.action_head = nn.Linear(in_features=hidden_dims[2], out_features=action_dim)
 
         # Sigma: learnable parameter, one per action
-        # Initialized to -0.5, so initial std = exp(-0.5) ≈ 0.6
-        # Lower std prevents excessive clipping with tanh output
-        self.log_std = nn.Parameter(torch.full((action_dim,), -0.5))
+        # Initialized to 0.0, so initial std = exp(0) = 1.0 (matches MLP)
+        self.log_std = nn.Parameter(torch.zeros(action_dim))
 
-        # Value Network (also SNN)
-        self.value_fc1 = nn.Linear(in_features=input_dim, out_features=snn_config["hidden_dim"])
+        # Value Network (Critic) - Dynamic architecture based on hidden_dims
+        self.value_fc1 = nn.Linear(in_features=input_dim, out_features=hidden_dims[0])
         self.value_lif1 = snn.Leaky(beta=snn_config["beta"],
                                     reset_mechanism=snn_config["reset_mechanism"],
                                     reset_delay=snn_config["reset_delay"],
                                     spike_grad=spike_grad)
-        self.value_fc2 = nn.Linear(in_features=snn_config["hidden_dim"], out_features=snn_config["hidden_dim"])
+        self.value_fc2 = nn.Linear(in_features=hidden_dims[0], out_features=hidden_dims[1])
         self.value_lif2 = snn.Leaky(beta=snn_config["beta"],
                                     reset_mechanism=snn_config["reset_mechanism"],
                                     reset_delay=snn_config["reset_delay"],
                                     spike_grad=spike_grad)
-        self.value_fc3 = nn.Linear(in_features=snn_config["hidden_dim"], out_features=snn_config["hidden_dim"])
+        self.value_fc3 = nn.Linear(in_features=hidden_dims[1], out_features=hidden_dims[2])
         self.value_lif3 = snn.Leaky(beta=snn_config["beta"],
                                     reset_mechanism=snn_config["reset_mechanism"],
                                     reset_delay=snn_config["reset_delay"],
                                     spike_grad=spike_grad)
 
-        # Value head: converts latent spikes (hidden_dim) to value estimate (1)
-        self.value_head = nn.Linear(in_features=snn_config["hidden_dim"], out_features=1)
+        # Value head: converts latent spikes (last hidden_dim) to value estimate (1)
+        self.value_head = nn.Linear(in_features=hidden_dims[2], out_features=1)
 
     def is_rnn(self):
         """Required by rl_games - indicates this is not an RNN network."""
@@ -176,11 +184,10 @@ class SNNActorCriticNetwork(nn.Module):
         policy_mean_spikes = torch.stack(spikes_policy_acc).mean(dim=0)
         value_mean_spikes = torch.stack(spikes_value_acc).mean(dim=0)
 
-        # Action output order: [thrust, roll, pitch, yaw_rate], all in [-1, 1]
-        # This matches LeeAttitudeController expected format directly (no transformation needed)
-        # Linear rescaling: map average spike rate [0, 1] to action space [-1, 1]
-        # Spike rate 0.0 → -1.0 (min action), 0.5 → 0.0 (neutral), 1.0 → +1.0 (max action)
-        mu = 2.0 * self.action_head(policy_mean_spikes) - 1.0  # (batch, action_dim) in [-1, 1]
+        # Action output order: [thrust, roll, pitch, yaw_rate]
+        # Direct output (unbounded) - matches MLP behavior
+        # Training learns appropriate action magnitudes; controller interprets values directly
+        mu = self.action_head(policy_mean_spikes)  # (batch, action_dim) - unbounded
         log_std = mu * 0 + self.log_std             # (batch, action_dim)
         value = self.value_head(value_mean_spikes)  # (batch, 1)
         states = None

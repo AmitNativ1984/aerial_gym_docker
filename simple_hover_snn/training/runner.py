@@ -41,6 +41,7 @@ from simple_hover_snn.config.robot_config import CustomQuadWithImuSNNCfg
 
 from rl_games.algos_torch import model_builder
 from simple_hover_snn.networks import SNNNetworkBuilder, MLPNetworkBuilder
+from simple_hover_snn.networks.weight_transfer import transfer_mlp_to_snn_weights, MLP_TO_SNN_MAPPING
 
 # =============================================================================
 # Register Custom Environment and Task
@@ -225,6 +226,7 @@ def get_args():
         {"name": "--track", "action": "store_true", "help": "Track with Weights and Biases"},
         {"name": "--wandb-project-name", "type": str, "default": "aerial_gym_snn", "help": "Wandb project name"},
         {"name": "--wandb-entity", "type": str, "default": None, "help": "Wandb entity (team)"},
+        {"name": "--mlp_checkpoint", "type": str, "default": None, "help": "Path to MLP checkpoint to transfer weights from (for SNN training)"},
     ]
     args = parse_arguments(description="Simple Hover SNN Task", custom_parameters=custom_parameters)
     args.sim_device_id = args.compute_device_id
@@ -303,6 +305,20 @@ if __name__ == "__main__":
     # Run training or playing
     logger.info("Starting training..." if args.get("train") else "Starting playback...")
 
+    # Handle MLP checkpoint transfer to SNN
+    mlp_checkpoint_path = args.get("mlp_checkpoint")
+    if mlp_checkpoint_path and args.get("train"):
+        # Verify we're training SNN (not MLP)
+        network_name = config["params"]["network"]["name"]
+        if network_name != "snn_actor_critic":
+            logger.warning(f"--mlp_checkpoint provided but network is '{network_name}', not 'snn_actor_critic'. Ignoring.")
+            mlp_checkpoint_path = None
+        elif not os.path.exists(mlp_checkpoint_path):
+            logger.error(f"MLP checkpoint not found: {mlp_checkpoint_path}")
+            sys.exit(1)
+        else:
+            logger.info(f"Will transfer weights from MLP checkpoint: {mlp_checkpoint_path}")
+
     # Patch to save config when experiment directory is created
     if args.get("train"):
         import glob
@@ -319,6 +335,41 @@ if __name__ == "__main__":
             return result
 
         A2CBase.init_tensors = patched_init_tensors
+
+    # Patch to transfer MLP weights to SNN after model creation
+    if mlp_checkpoint_path:
+        from rl_games.algos_torch.a2c_continuous import A2CAgent
+        original_init_model = A2CAgent.init_tensors
+
+        def patched_init_model_with_transfer(self):
+            result = original_init_model(self)
+
+            # Load MLP checkpoint
+            logger.info(f"Loading MLP checkpoint: {mlp_checkpoint_path}")
+            mlp_checkpoint = torch.load(mlp_checkpoint_path, map_location=self.device)
+
+            # Extract model state dict from checkpoint
+            if 'model' in mlp_checkpoint:
+                mlp_state_dict = mlp_checkpoint['model']
+            else:
+                mlp_state_dict = mlp_checkpoint
+
+            # Get current SNN model state dict
+            snn_state_dict = self.model.state_dict()
+
+            # Transfer weights
+            logger.info("Transferring MLP weights to SNN...")
+            updated_state_dict = transfer_mlp_to_snn_weights(
+                mlp_state_dict, snn_state_dict, verbose=True
+            )
+
+            # Load updated weights into model
+            self.model.load_state_dict(updated_state_dict)
+            logger.info("MLP to SNN weight transfer complete!")
+
+            return result
+
+        A2CAgent.init_tensors = patched_init_model_with_transfer
 
     runner.run(args)
 
