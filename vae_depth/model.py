@@ -3,16 +3,10 @@ import torch.nn as nn
 
 
 class DepthEncoder(nn.Module):
-    """ResNet8-style convolutional encoder for depth images.
+    """Convolutional encoder for depth images.
 
-    Architecture: 5 strided conv layers with BatchNorm + ELU and
-    3 learned skip connections, followed by 1x1 conv channel reduction,
-    flatten, and 2 FC layers (with 512-dim hidden).
-
-    Skip connections:
-        block0 output (32ch) --conv_skip0--> added to block1 output (64ch)
-        block1 output (64ch) --conv_skip1--> added to block2 output (128ch)
-        block2 output (128ch) --conv_skip2--> added to block3 output (256ch)
+    Architecture: 4 blocks of strided conv layers with BatchNorm + ELU,
+    followed by 1x1 conv channel reduction, flatten, and FC head (512-dim hidden).
 
     Input:  [B, 1, 180, 320]
     Output: [B, 2 * latent_dim]  (concatenated mu and logvar)
@@ -29,29 +23,23 @@ class DepthEncoder(nn.Module):
         self.conv0_1 = nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1)
         self.bn0_1 = nn.BatchNorm2d(32)
 
-        # Block 1: 45x80 -> 23x40 (with skip from block 0)
+        # Block 1: 45x80 -> 23x40
         self.conv1_0 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
         self.bn1_0 = nn.BatchNorm2d(64)
         self.conv1_1 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
         self.bn1_1 = nn.BatchNorm2d(64)
-        # Skip: 32ch @ 45x80 -> 64ch @ 23x40
-        self.skip0 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
 
-        # Block 2: 23x40 -> 12x20 (with skip from block 1)
+        # Block 2: 23x40 -> 12x20
         self.conv2_0 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
         self.bn2_0 = nn.BatchNorm2d(128)
         self.conv2_1 = nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)
         self.bn2_1 = nn.BatchNorm2d(128)
-        # Skip: 64ch @ 23x40 -> 128ch @ 12x20
-        self.skip1 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
 
-        # Block 3: 12x20 -> 6x10 (with skip from block 2)
+        # Block 3: 12x20 -> 6x10
         self.conv3_0 = nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1)
         self.bn3_0 = nn.BatchNorm2d(256)
         self.conv3_1 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
         self.bn3_1 = nn.BatchNorm2d(256)
-        # Skip: 128ch @ 12x20 -> 256ch @ 6x10
-        self.skip2 = nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1)
 
         # 1x1 conv to reduce channels: 256 -> fc_channel_dim
         self.channel_reduce = nn.Sequential(
@@ -83,27 +71,18 @@ class DepthEncoder(nn.Module):
         # Block 0: [B,1,180,320] -> [B,32,45,80]
         x = self.elu(self.bn0(self.conv0(x)))
         x = self.elu(self.bn0_1(self.conv0_1(x)))
-        x0 = x  # save for skip
 
-        # Block 1: [B,32,45,80] -> [B,64,23,40] + skip
-        x = self.bn1_0(self.conv1_0(x))
-        x = self.bn1_1(self.conv1_1(x))
-        x = x + self.skip0(x0)
-        x = self.elu(x)
-        x1 = x  # save for skip
+        # Block 1: [B,32,45,80] -> [B,64,23,40]
+        x = self.elu(self.bn1_0(self.conv1_0(x)))
+        x = self.elu(self.bn1_1(self.conv1_1(x)))
 
-        # Block 2: [B,64,23,40] -> [B,128,12,20] + skip
-        x = self.bn2_0(self.conv2_0(x))
-        x = self.bn2_1(self.conv2_1(x))
-        x = x + self.skip1(x1)
-        x = self.elu(x)
-        x2 = x  # save for skip
+        # Block 2: [B,64,23,40] -> [B,128,12,20]
+        x = self.elu(self.bn2_0(self.conv2_0(x)))
+        x = self.elu(self.bn2_1(self.conv2_1(x)))
 
-        # Block 3: [B,128,12,20] -> [B,256,6,10] + skip
-        x = self.bn3_0(self.conv3_0(x))
-        x = self.bn3_1(self.conv3_1(x))
-        x = x + self.skip2(x2)
-        x = self.elu(x)
+        # Block 3: [B,128,12,20] -> [B,256,6,10]
+        x = self.elu(self.bn3_0(self.conv3_0(x)))
+        x = self.elu(self.bn3_1(self.conv3_1(x)))
 
         # 1x1 reduce + flatten + FC
         x = self.channel_reduce(x)

@@ -57,71 +57,83 @@ def load_model(checkpoint_path, device):
 
 
 def plot_reconstructions(model, val_loader, device, config, output_dir, num_samples=16):
-    """Save ground truth vs reconstruction images side by side with colorbar."""
+    """Save Original | Dilated GT | Predicted images side by side with colorbar."""
     os.makedirs(output_dir, exist_ok=True)
     model.eval()
 
     with torch.no_grad():
         batch_depth_m = next(iter(val_loader))
         batch_depth_m = batch_depth_m[:num_samples].to(device)
-        batch_input = min_pool_dilation(batch_depth_m, config.dilation_kernel_size)
-        batch_input = normalize_depth(batch_input, config.max_depth_m, config.min_depth_m)
+        batch_input = normalize_depth(batch_depth_m, config.max_depth_m, config.min_depth_m)
+        batch_target = min_pool_dilation(batch_depth_m, config.dilation_kernel_size)
+        batch_target = normalize_depth(batch_target, config.max_depth_m, config.min_depth_m)
         x_recon, mu, logvar, z = model(batch_input)
 
     batch_input = batch_input.cpu()
+    batch_target = batch_target.cpu()
     x_recon = x_recon.cpu()
 
     n = min(num_samples, 8)
 
-    # --- Reconstructions: each row is [GT | Recon] for one sample ---
-    fig, axes = plt.subplots(n, 2, figsize=(12, 2.2 * n))
+    # --- Reconstructions: each row is [Input | Dilated GT | Predicted] ---
+    fig, axes = plt.subplots(n, 3, figsize=(16, 2.2 * n))
     if n == 1:
         axes = axes[np.newaxis, :]
 
     for i in range(n):
-        img_gt = batch_input[i, 0].numpy()
+        img_input = batch_input[i, 0].numpy()
+        img_target = batch_target[i, 0].numpy()
         img_rec = x_recon[i, 0].numpy()
 
-        im_gt = axes[i, 0].imshow(img_gt, cmap="plasma", vmin=0, vmax=1)
-        axes[i, 0].set_title(f"Ground Truth {i}", fontsize=9)
+        axes[i, 0].imshow(img_input, cmap="turbo", vmin=0, vmax=1)
+        axes[i, 0].set_title(f"Raw Depth {i}", fontsize=9)
         axes[i, 0].axis("off")
 
-        im_rec = axes[i, 1].imshow(img_rec, cmap="plasma", vmin=0, vmax=1)
-        axes[i, 1].set_title(f"Reconstruction {i}", fontsize=9)
+        im_gt = axes[i, 1].imshow(img_target, cmap="turbo", vmin=0, vmax=1)
+        axes[i, 1].set_title(f"Dilated GT {i}", fontsize=9)
         axes[i, 1].axis("off")
+
+        axes[i, 2].imshow(img_rec, cmap="turbo", vmin=0, vmax=1)
+        axes[i, 2].set_title(f"Predicted {i}", fontsize=9)
+        axes[i, 2].axis("off")
 
     # Shared colorbar on the right
     fig.subplots_adjust(right=0.92)
     cbar_ax = fig.add_axes([0.93, 0.15, 0.015, 0.7])
     cbar = fig.colorbar(im_gt, cax=cbar_ax)
-    cbar.set_label("Normalized inverse depth (near=1, far=0)", fontsize=8)
+    cbar.set_label("Normalized depth (near=1, far=0)", fontsize=8)
 
     path = os.path.join(output_dir, "reconstructions.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Saved reconstructions to {path}")
 
-    # --- Error heatmaps: each row is [GT | Recon | Error] ---
-    fig, axes = plt.subplots(n, 3, figsize=(16, 2.2 * n))
+    # --- Error heatmaps: each row is [Input | Target | Predicted | Error] ---
+    fig, axes = plt.subplots(n, 4, figsize=(20, 2.2 * n))
     if n == 1:
         axes = axes[np.newaxis, :]
 
     for i in range(n):
-        img_gt = batch_input[i, 0].numpy()
+        img_input = batch_input[i, 0].numpy()
+        img_target = batch_target[i, 0].numpy()
         img_rec = x_recon[i, 0].numpy()
-        error = np.abs(img_gt - img_rec)
+        error = np.abs(img_target - img_rec)
 
-        axes[i, 0].imshow(img_gt, cmap="plasma", vmin=0, vmax=1)
-        axes[i, 0].set_title(f"Ground Truth {i}", fontsize=9)
+        axes[i, 0].imshow(img_input, cmap="turbo", vmin=0, vmax=1)
+        axes[i, 0].set_title(f"Raw Depth {i}", fontsize=9)
         axes[i, 0].axis("off")
 
-        axes[i, 1].imshow(img_rec, cmap="plasma", vmin=0, vmax=1)
-        axes[i, 1].set_title(f"Reconstruction {i}", fontsize=9)
+        axes[i, 1].imshow(img_target, cmap="turbo", vmin=0, vmax=1)
+        axes[i, 1].set_title(f"Dilated GT {i}", fontsize=9)
         axes[i, 1].axis("off")
 
-        im_err = axes[i, 2].imshow(error, cmap="hot", vmin=0, vmax=0.5)
-        axes[i, 2].set_title(f"Error (MAE={error.mean():.4f})", fontsize=9)
+        axes[i, 2].imshow(img_rec, cmap="turbo", vmin=0, vmax=1)
+        axes[i, 2].set_title(f"Predicted {i}", fontsize=9)
         axes[i, 2].axis("off")
+
+        im_err = axes[i, 3].imshow(error, cmap="hot", vmin=0, vmax=0.5)
+        axes[i, 3].set_title(f"Error (MAE={error.mean():.4f})", fontsize=9)
+        axes[i, 3].axis("off")
 
     fig.subplots_adjust(right=0.92)
     cbar_ax = fig.add_axes([0.93, 0.15, 0.015, 0.7])
@@ -145,8 +157,7 @@ def plot_latent_statistics(model, val_loader, device, config, output_dir):
     with torch.no_grad():
         for batch_depth_m in val_loader:
             batch_depth_m = batch_depth_m.to(device)
-            batch_input = min_pool_dilation(batch_depth_m, config.dilation_kernel_size)
-            batch_input = normalize_depth(batch_input, config.max_depth_m, config.min_depth_m)
+            batch_input = normalize_depth(batch_depth_m, config.max_depth_m, config.min_depth_m)
             _, mu, logvar, _ = model(batch_input)
             all_mu.append(mu.cpu())
             all_logvar.append(logvar.cpu())

@@ -12,19 +12,18 @@ import torch
 import torch.nn.functional as F
 
 from vae_depth.model import DepthVAE
-from vae_depth.preprocessing import min_pool_dilation, normalize_depth
+from vae_depth.preprocessing import normalize_depth
 
 
 class DepthVAEImageEncoder:
     """Wraps the trained DepthVAE encoder for frozen inference during RL.
 
-    Pipeline:
+    Pipeline (Deep Collision Encoding):
         1. Receive [num_envs, H, W] depth from simulator (normalized [0,1] by sensor)
         2. Scale to meters
         3. Resize to target resolution (nearest)
-        4. Min-pool dilation
-        5. Inverse depth normalization
-        6. Encoder forward -> [num_envs, latent_dim] (mu only, deterministic)
+        4. Normalize (no dilation -- collision safety is implicit in latent space)
+        5. Encoder forward -> [num_envs, latent_dim] (mu only, deterministic)
     """
 
     def __init__(self, config, device="cuda:0"):
@@ -44,7 +43,6 @@ class DepthVAEImageEncoder:
 
         self.latent_dim = config.latent_dims
         self.target_res = (config.target_height, config.target_width)
-        self.dilation_kernel_size = config.dilation_kernel_size
         self.max_depth_m = config.max_depth_m
         self.min_depth_m = config.min_depth_m
         self.sensor_max_range = getattr(config, "sensor_max_range", 10.0)
@@ -71,10 +69,7 @@ class DepthVAEImageEncoder:
             if x.shape[-2:] != self.target_res:
                 x = F.interpolate(x, self.target_res, mode="nearest")
 
-            # Min-pool dilation
-            x = min_pool_dilation(x, self.dilation_kernel_size)
-
-            # Inverse depth normalization
+            # Normalize (no dilation -- DCE encoder learned collision safety)
             x = normalize_depth(x, self.max_depth_m, self.min_depth_m)
 
             # Encode -> [B, 2*latent_dim], take mu (first half)

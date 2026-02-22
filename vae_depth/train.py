@@ -31,19 +31,31 @@ from vae_depth.model import DepthVAE
 from vae_depth.preprocessing import min_pool_dilation, normalize_depth
 
 
-def preprocess_batch(batch_depth_m, config):
-    """Apply min-pool dilation and normalization on GPU.
+def prepare_input(batch_depth_m, config):
+    """Prepare encoder input: normalize only (no dilation).
 
     Args:
         batch_depth_m: [B, 1, H, W] raw depth in meters (on GPU).
         config: VAEConfig.
 
     Returns:
-        [B, 1, H, W] normalized inverse depth in [0, 1).
+        [B, 1, H, W] normalized depth in [0, 1].
+    """
+    return normalize_depth(batch_depth_m, config.max_depth_m, config.min_depth_m)
+
+
+def prepare_target(batch_depth_m, config):
+    """Prepare decoder target: dilate + normalize.
+
+    Args:
+        batch_depth_m: [B, 1, H, W] raw depth in meters (on GPU).
+        config: VAEConfig.
+
+    Returns:
+        [B, 1, H, W] dilated + normalized depth in [0, 1].
     """
     x = min_pool_dilation(batch_depth_m, config.dilation_kernel_size)
-    x = normalize_depth(x, config.max_depth_m, config.min_depth_m)
-    return x
+    return normalize_depth(x, config.max_depth_m, config.min_depth_m)
 
 
 def parse_args():
@@ -131,9 +143,9 @@ def select_diverse_samples(val_loader, device, config, num_images=8):
     with torch.no_grad():
         for batch_depth_m in val_loader:
             batch_depth_m = batch_depth_m.to(device)
-            batch_norm = preprocess_batch(batch_depth_m, config)
-            for i in range(batch_norm.size(0)):
-                obstacle_frac = (batch_norm[i] > config.obstacle_threshold).float().mean().item()
+            batch_target = prepare_target(batch_depth_m, config)
+            for i in range(batch_target.size(0)):
+                obstacle_frac = (batch_target[i] > config.obstacle_threshold).float().mean().item()
                 candidates.append((obstacle_frac, batch_depth_m[i:i+1]))
             if len(candidates) >= 500:
                 break
@@ -146,7 +158,7 @@ def select_diverse_samples(val_loader, device, config, num_images=8):
 
 def log_reconstruction_images(writer, model, val_loader, device, epoch, config, num_images=8,
                               _cached_samples=[None]):
-    """Log sample reconstruction images to TensorBoard with plasma colormap."""
+    """Log sample reconstruction images to TensorBoard: Original | Dilated GT | Predicted."""
     model.eval()
     with torch.no_grad():
         # Cache diverse samples on first call so we track the same images across epochs
@@ -154,18 +166,20 @@ def log_reconstruction_images(writer, model, val_loader, device, epoch, config, 
             _cached_samples[0] = select_diverse_samples(val_loader, device, config, num_images)
 
         batch_depth_m = _cached_samples[0].to(device)
-        batch_target = preprocess_batch(batch_depth_m, config)
-        x_recon, _, _, _ = model(batch_target)
+        batch_input = prepare_input(batch_depth_m, config)
+        batch_target = prepare_target(batch_depth_m, config)
+        x_recon, _, _, _ = model(batch_input)
 
-        # Apply plasma colormap with shared [0,1] scale (no per-image normalization)
+        # Apply turbo colormap with shared [0,1] scale (no per-image normalization)
+        input_rgb = apply_colormap(batch_input, per_image_norm=False)
         target_rgb = apply_colormap(batch_target, per_image_norm=False)
         recon_rgb = apply_colormap(x_recon, per_image_norm=False)
 
-        # Side by side: [N, 3, H, 2*W]
-        comparison = torch.cat([target_rgb, recon_rgb], dim=3)
-        writer.add_images("reconstruction/input_vs_recon", comparison, epoch)
+        # Side by side: [N, 3, H, 3*W] -- Original | Dilated GT | Predicted
+        comparison = torch.cat([input_rgb, target_rgb, recon_rgb], dim=3)
+        writer.add_images("reconstruction/input_dilated_recon", comparison, epoch)
 
-        # Error heatmap with "hot" colormap
+        # Error heatmap: predicted vs dilated GT
         error = torch.abs(batch_target - x_recon)
         error_rgb = apply_colormap(error, cmap_name="hot")
         writer.add_images("reconstruction/error", error_rgb, epoch)
@@ -181,9 +195,10 @@ def train_one_epoch(model, train_loader, optimizer, device, beta, config):
     pbar = tqdm(train_loader, desc="  Train", leave=False)
     for batch_depth_m in pbar:
         batch_depth_m = batch_depth_m.to(device)
-        batch_target = preprocess_batch(batch_depth_m, config)
+        batch_input = prepare_input(batch_depth_m, config)
+        batch_target = prepare_target(batch_depth_m, config)
 
-        x_recon, mu, logvar, z = model(batch_target)
+        x_recon, mu, logvar, z = model(batch_input)
         loss, recon_loss, kl_loss = vae_loss(
             x_recon, batch_target, mu, logvar, beta,
             config.obstacle_weight, config.obstacle_threshold,
@@ -223,9 +238,10 @@ def validate(model, val_loader, device, beta, config):
     pbar = tqdm(val_loader, desc="  Val  ", leave=False)
     for batch_depth_m in pbar:
         batch_depth_m = batch_depth_m.to(device)
-        batch_target = preprocess_batch(batch_depth_m, config)
+        batch_input = prepare_input(batch_depth_m, config)
+        batch_target = prepare_target(batch_depth_m, config)
 
-        x_recon, mu, logvar, z = model(batch_target)
+        x_recon, mu, logvar, z = model(batch_input)
         loss, recon_loss, kl_loss = vae_loss(
             x_recon, batch_target, mu, logvar, beta,
             config.obstacle_weight, config.obstacle_threshold,
