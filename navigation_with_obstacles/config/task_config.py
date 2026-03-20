@@ -50,8 +50,8 @@ class task_config:
 
     # Target waypoint placement (as ratio of environment bounds)
     # Target is placed in the far end of the environment
-    target_min_ratio = [0.80, 0.20, 0.20]
-    target_max_ratio = [0.95, 0.80, 0.80]
+    target_min_ratio = [0.95, 0.10, 0.10]
+    target_max_ratio = [1.00, 0.90, 0.90]
 
     # Reward parameters
     reward_parameters = {
@@ -61,11 +61,11 @@ class task_config:
         "collision_penalty": -100.0,  # obstacle collision termination
         "d_min": 1.0,                 # arrival distance threshold (meters)
         # Progress reward (dense shaping, all lambda < 0)
-        "lambda_d": -0.001,           # distance to target (horizontal + vertical)
-        "lambda_v": -0.001,           # excessive horizontal speed penalty
-        "lambda_dir": -0.002,         # velocity-goal direction misalignment
-        "lambda_input": -0.0005,      # angular velocity penalty (attitude stability)
-        "lambda_perc": -0.001,        # perception: discourage lateral/backward flight
+        "lambda_d": -0.005,           # distance to target (horizontal + vertical)
+        "lambda_v": -0.005,           # excessive horizontal speed penalty
+        "lambda_dir": -0.010,         # velocity-goal direction misalignment
+        "lambda_input": -0.0025,      # angular velocity penalty (attitude stability)
+        "lambda_perc": -0.005,        # perception: discourage lateral/backward flight
     }
 
     # Speed threshold for excess speed penalty (m/s)
@@ -94,8 +94,8 @@ class task_config:
         Levels 0-5: large panels
         Levels 6-30: cumulative panels + small objects
         """
-        min_level = 0
-        max_level = 30
+        min_level = 15
+        max_level = 15
         check_after_log_instances = 2048
         increase_step = 2
         decrease_step = 1

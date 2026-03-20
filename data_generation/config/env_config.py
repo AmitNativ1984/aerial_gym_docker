@@ -32,10 +32,12 @@ class dense_panel_params(panel_asset_params):
 
 class dense_thin_params(thin_asset_params):
     num_assets = 8
+    keep_in_env = False
 
 
 class dense_tree_params(tree_asset_params):
     num_assets = 4
+    keep_in_env = False
 
 
 class dense_object_params(object_asset_params):

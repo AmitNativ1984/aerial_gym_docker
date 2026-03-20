@@ -18,9 +18,9 @@ class NavQuadWithCameraCfg(BaseQuadWithCameraCfg):
         # Y: 30-70% (centered, with some randomization)
         # Z: 30-70% (centered, with some randomization)
         min_state_ratio = [
-            0.05,     # X: near start
-            0.3,      # Y: 30%
-            0.3,      # Z: 30%
+            0.00,     # X: at lower X bound
+            0.10,     # Y: 10%
+            0.10,     # Z: 10%
             0,        # Roll (rad)
             0,        # Pitch (rad)
             -np.pi,   # Yaw min (facing any direction)
@@ -33,9 +33,9 @@ class NavQuadWithCameraCfg(BaseQuadWithCameraCfg):
             0,        # Angular velocity Z
         ]
         max_state_ratio = [
-            0.15,     # X: spawn zone width
-            0.7,      # Y: 70%
-            0.7,      # Z: 70%
+            0.05,     # X: thin band at lower X bound
+            0.90,     # Y: 90%
+            0.90,     # Z: 90%
             0,        # Roll (rad)
             0,        # Pitch (rad)
             np.pi,    # Yaw max

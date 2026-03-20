@@ -112,6 +112,10 @@ class AERIALRLGPUEnv(vecenv.IVecEnv):
     def get_number_of_agents(self):
         return self.env.get_number_of_agents()
 
+    def render(self, mode="human"):
+        """No-op render — Isaac Gym handles its own viewer."""
+        pass
+
     def get_env_info(self):
         """Return observation and action space info for rl_games."""
         info = {}
@@ -231,7 +235,10 @@ def update_config(config, args):
         config["params"]["seed"] = args["seed"]
         config["params"]["config"]["env_config"]["seed"] = args["seed"]
 
-    config["params"]["config"]["player"] = {"use_vecenv": True}
+    # Merge use_vecenv into existing player config (don't overwrite YAML settings)
+    player_cfg = config["params"]["config"].get("player", {})
+    player_cfg["use_vecenv"] = True
+    config["params"]["config"]["player"] = player_cfg
 
     return config
 

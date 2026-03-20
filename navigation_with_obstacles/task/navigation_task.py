@@ -20,10 +20,19 @@ from aerial_gym.utils.math import (
 )
 from aerial_gym.utils.logging import CustomLogger
 
+import os
 import torch
 import numpy as np
+import cv2
 import gymnasium as gym
 from gym.spaces import Dict, Box
+from isaacgym import gymapi, gymutil
+
+# Set Qt plugin path for OpenCV GUI (Isaac Gym container lacks system xcb plugin)
+os.environ.setdefault(
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+    "/usr/local/lib/python3.8/dist-packages/cv2/qt/plugins/platforms/",
+)
 
 logger = CustomLogger("navigation_with_obstacles_task")
 
@@ -157,12 +166,26 @@ class NavigationWithObstaclesTask(BaseTask):
         self.logged_crash_rate = 0.0
         self.logged_exceed_rate = 0.0
 
-        # Per-step reward component means (for tensorboard)
-        self.logged_r_dist = 0.0
-        self.logged_r_speed = 0.0
-        self.logged_r_dir = 0.0
-        self.logged_r_angvel = 0.0
-        self.logged_r_perc = 0.0
+        # Running-average reward components for tensorboard.
+        # IsaacAlgoObserver overwrites direct_info each step and only logs the
+        # last step's values, so we accumulate across steps and expose the mean.
+        self._reward_comp_sum = {
+            "r_dist": 0.0, "r_speed": 0.0, "r_dir": 0.0,
+            "r_angvel": 0.0, "r_perc": 0.0,
+        }
+        self._reward_comp_count = 0
+
+        # Per-env r_dist accumulator for episode-end logging.
+        # Instead of logging the per-step mean (biased toward mid-flight),
+        # we accumulate r_dist over each episode and log the mean across
+        # episodes that ended this step.
+        self._ep_r_dist_sum = torch.zeros(
+            self.sim_env.num_envs, device=self.device
+        )
+        self._ep_r_dist_steps = torch.zeros(
+            self.sim_env.num_envs, device=self.device, dtype=torch.int32
+        )
+        self._logged_ep_r_dist = 0.0
 
         # Termination/truncation tensors
         # IMPORTANT: self.terminations is a SEPARATE tensor, NOT an alias of
@@ -214,6 +237,24 @@ class NavigationWithObstaclesTask(BaseTask):
             self.sim_env.cfg.env, "keep_same_env_for_num_episodes", 1
         )
 
+        # Debug visualization: goal/start spheres + depth camera window
+        self._headless = self.task_config.headless
+        if not self._headless:
+            self._gym = self.sim_env.IGE_env.gym
+            self._viewer = self.sim_env.IGE_env.viewer.viewer
+            self._env_handles = self.sim_env.IGE_env.env_handles
+            self._goal_sphere = gymutil.WireframeSphereGeometry(
+                0.5, 16, 16, None, color=(1, 0, 0)  # red
+            )
+            self._start_sphere = gymutil.WireframeSphereGeometry(
+                0.3, 12, 12, None, color=(0, 1, 0)  # green
+            )
+            # Store initial drone positions for start marker
+            self._start_positions = self.obs_dict["robot_position"].clone()
+            # Create OpenCV window for depth camera
+            cv2.namedWindow("Depth Camera", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("Depth Camera", 640, 360)
+
         logger.info(
             f"Task initialized with {self.num_envs} environments, "
             f"obs_dim={self.task_config.observation_space_dim}, "
@@ -223,6 +264,8 @@ class NavigationWithObstaclesTask(BaseTask):
 
     def close(self):
         """Clean up simulation resources."""
+        if not self._headless:
+            cv2.destroyAllWindows()
         del self.sim_env
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
@@ -296,11 +339,40 @@ class NavigationWithObstaclesTask(BaseTask):
         # Reset previous angular velocity for angular acceleration computation
         self.prev_body_angvel[env_ids] = 0.0
 
-        self.infos = {}
+        # Store start positions for debug visualization
+        if not self._headless:
+            self._start_positions[env_ids] = self.obs_dict["robot_position"][env_ids].clone()
 
     def render(self):
         """Render the environment."""
         return self.sim_env.render()
+
+    def _draw_debug_visuals(self):
+        """Draw goal (red) and start (green) spheres in the viewer."""
+        self._gym.clear_lines(self._viewer)
+        for i in range(self.num_envs):
+            # Goal sphere (red)
+            goal_pos = self.target_position[i].cpu().numpy()
+            goal_pose = gymapi.Transform(p=gymapi.Vec3(*goal_pos))
+            gymutil.draw_lines(
+                self._goal_sphere, self._gym, self._viewer,
+                self._env_handles[i], goal_pose,
+            )
+            # Start sphere (green)
+            start_pos = self._start_positions[i].cpu().numpy()
+            start_pose = gymapi.Transform(p=gymapi.Vec3(*start_pos))
+            gymutil.draw_lines(
+                self._start_sphere, self._gym, self._viewer,
+                self._env_handles[i], start_pose,
+            )
+
+    def _show_depth_camera(self):
+        """Display depth camera feed in an OpenCV window."""
+        depth = self.obs_dict["depth_range_pixels"][0, 0].cpu().numpy()
+        depth_vis = (np.clip(depth, 0, 1) * 255).astype(np.uint8)
+        depth_color = cv2.applyColorMap(depth_vis, cv2.COLORMAP_PLASMA)
+        cv2.imshow("Depth Camera", depth_color)
+        cv2.waitKey(1)
 
     def step(self, actions):
         """
@@ -312,6 +384,20 @@ class NavigationWithObstaclesTask(BaseTask):
         Returns:
             Tuple of (observations, rewards, terminations, truncations, infos)
         """
+        # Reset reward component accumulators at the start of each rollout.
+        # rl_games' IsaacAlgoObserver overwrites direct_info every step and only
+        # logs the final step, so we accumulate a running average across the
+        # rollout. Reset here using a simple step counter; horizon_length is read
+        # once from the yaml config (default 64).
+        if not hasattr(self, "_rollout_step"):
+            self._rollout_step = 0
+            self._horizon_length = 64  # matches ppo_navigation.yaml
+        if self._rollout_step >= self._horizon_length:
+            self._reward_comp_sum = {k: 0.0 for k in self._reward_comp_sum}
+            self._reward_comp_count = 0
+            self._rollout_step = 0
+        self._rollout_step += 1
+
         # Transform network outputs to controller commands
         transformed_action = self.action_transformation_function(actions)
 
@@ -354,12 +440,25 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["crash_rate"] = self.logged_crash_rate
         self.infos["exceed_rate"] = self.logged_exceed_rate
 
-        # Reward components (mean across progress envs)
-        self.infos["reward/r_dist"] = self.logged_r_dist
-        self.infos["reward/r_speed"] = self.logged_r_speed
-        self.infos["reward/r_dir"] = self.logged_r_dir
-        self.infos["reward/r_angvel"] = self.logged_r_angvel
-        self.infos["reward/r_perc"] = self.logged_r_perc
+        # Reward components (running average across steps within rollout)
+        n = max(self._reward_comp_count, 1)
+        self.infos["reward/r_dist"] = self._reward_comp_sum["r_dist"] / n
+        self.infos["reward/r_speed"] = self._reward_comp_sum["r_speed"] / n
+        self.infos["reward/r_dir"] = self._reward_comp_sum["r_dir"] / n
+        self.infos["reward/r_angvel"] = self._reward_comp_sum["r_angvel"] / n
+        self.infos["reward/r_perc"] = self._reward_comp_sum["r_perc"] / n
+
+        # Episode-end r_dist: mean per-step r_dist averaged over episodes
+        # that ended this step (success, crash, exceed, or timeout).
+        ended_mask = (self.terminations > 0) | timeout_mask
+        if ended_mask.any():
+            ended_steps = self._ep_r_dist_steps[ended_mask].float().clamp(min=1)
+            ep_r_dist_mean = (self._ep_r_dist_sum[ended_mask] / ended_steps).mean()
+            self._logged_ep_r_dist = float(ep_r_dist_mean)
+            # Reset accumulators for ended episodes
+            self._ep_r_dist_sum[ended_mask] = 0.0
+            self._ep_r_dist_steps[ended_mask] = 0
+        self.infos["reward/r_dist_episode_end"] = self._logged_ep_r_dist
 
         # Flight metrics (mean across all envs)
         robot_pos = self.obs_dict["robot_position"]
@@ -383,13 +482,28 @@ class NavigationWithObstaclesTask(BaseTask):
         # Process depth image through VAE encoder
         self.process_image_observation()
 
+        # Debug visualization (only in non-headless mode)
+        if not self._headless:
+            self._draw_debug_visuals()
+            self._show_depth_camera()
+
         return self.get_return_tuple()
 
     def process_image_observation(self):
         """Encode depth image through custom DepthVAE to get latent representation."""
         if self.task_config.vae_config.use_vae and self.vae_model is not None:
             image_obs = self.obs_dict["depth_range_pixels"].squeeze(1)
-            self.image_latents[:] = self.vae_model.encode(image_obs)
+            # Batch VAE encoding to avoid CUDA OOM on large num_envs
+            batch_size = 128
+            n = image_obs.shape[0]
+            if n <= batch_size:
+                self.image_latents[:] = self.vae_model.encode(image_obs)
+            else:
+                for start in range(0, n, batch_size):
+                    end = min(start + batch_size, n)
+                    self.image_latents[start:end] = self.vae_model.encode(
+                        image_obs[start:end]
+                    )
 
     def get_return_tuple(self):
         """Build and return the step/reset output tuple."""
@@ -627,11 +741,16 @@ class NavigationWithObstaclesTask(BaseTask):
             torch.abs(body_linvel[:, 1]) + torch.clamp(-body_linvel[:, 0], min=0.0)
         )
 
-        # Store component means for tensorboard
-        self.logged_r_dist = float(r_dist.mean())
-        self.logged_r_speed = float(r_speed.mean())
-        self.logged_r_dir = float(r_dir.mean())
-        self.logged_r_angvel = float(r_angvel.mean())
-        self.logged_r_perc = float(r_perc.mean())
+        # Accumulate component means for tensorboard running average
+        self._reward_comp_sum["r_dist"] += float(r_dist.mean())
+        self._reward_comp_sum["r_speed"] += float(r_speed.mean())
+        self._reward_comp_sum["r_dir"] += float(r_dir.mean())
+        self._reward_comp_sum["r_angvel"] += float(r_angvel.mean())
+        self._reward_comp_sum["r_perc"] += float(r_perc.mean())
+        self._reward_comp_count += 1
+
+        # Accumulate r_dist per env for episode-end logging
+        self._ep_r_dist_sum[mask] += r_dist
+        self._ep_r_dist_steps[mask] += 1
 
         return r_dist + r_speed + r_dir + r_angvel + r_perc
