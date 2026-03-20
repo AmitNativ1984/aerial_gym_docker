@@ -63,7 +63,7 @@ class task_config:
         # Progress reward (dense shaping, all lambda < 0)
         "lambda_d": -0.005,           # distance to target (horizontal + vertical)
         "lambda_v": -0.005,           # excessive horizontal speed penalty
-        "lambda_dir": -0.010,         # velocity-goal direction misalignment
+        "lambda_dir": -0.003,         # velocity-goal direction misalignment
         "lambda_input": -0.0025,      # angular velocity penalty (attitude stability)
         "lambda_perc": -0.005,        # perception: discourage lateral/backward flight
     }
@@ -84,8 +84,8 @@ class task_config:
         target_width = 320
 
         # Depth range parameters
-        max_depth_m = 10.0
-        min_depth_m = 0.2
+        max_depth_m = 7.0
+        min_depth_m = 0.1
         sensor_max_range = 10.0
 
     class curriculum:
@@ -94,8 +94,8 @@ class task_config:
         Levels 0-5: large panels
         Levels 6-30: cumulative panels + small objects
         """
-        min_level = 15
-        max_level = 15
+        min_level = 0
+        max_level = 25
         check_after_log_instances = 2048
         increase_step = 2
         decrease_step = 1
