@@ -81,7 +81,8 @@ FROM aerial_gym AS dev
 
 RUN pip install \
     loguru \
-    snntorch
+    snntorch \
+    wandb
 
 CMD ["bash"]
 
