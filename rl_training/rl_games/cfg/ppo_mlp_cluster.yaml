@@ -156,7 +156,15 @@ params:
     # For scale, breezy-thunder-6 finished with bounds_loss 0.18 and mean |mu| 0.84 -- a
     # 180x difference in the same quantity, same coefficient. The coefficient was never
     # wrong on its own; it became too weak when the task changed underneath it.
-    bounds_loss_coef: 0.001
+    #
+    # PROMOTED TO DEFAULT from the smoothness/saturation B-series: 0.01 (10x) was B1's
+    # isolated test and held up combined with the magnitude penalty in B4 -- 8.3x lower
+    # bounds_loss than 0.001 at matched curriculum levels, flat instead of growing, and
+    # curriculum progression ~13% FASTER, not slower. See rl_training/README or the B1/B4
+    # PR (f450-smoothness-saturation-experiments) for the full comparison data. Known
+    # tradeoff: jerk was mildly worse in B1 alone (removing the clamp removed some
+    # incidental smoothing) -- resolved by pairing with lambda_action_mag below.
+    bounds_loss_coef: 0.01
     # 5000, up from 1000. The previous run was still gaining curriculum levels when it hit
     # the 1000-epoch ceiling (reached level 14 at epoch 984), so it stopped for want of
     # budget rather than progress. At ~31 s/epoch, 5000 epochs is ~43 h.

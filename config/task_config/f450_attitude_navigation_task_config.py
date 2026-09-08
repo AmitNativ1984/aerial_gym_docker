@@ -228,7 +228,13 @@ class task_config:
         # much smaller penalty (0.04 * (exp(-0.245)-1) = -0.0087) -- saturating, not
         # linear, so it discourages high sustained magnitude without cratering reward
         # for a policy that occasionally needs a large but brief command.
-        "lambda_action_mag": float(os.environ.get("F450_LAMBDA_ACTION_MAG", 0.0)),
+        #
+        # PROMOTED TO DEFAULT from the smoothness/saturation B-series: 0.04, B3's isolated
+        # value, held up combined with bounds_loss_coef=0.01 in B4 (6.6x lower bounds_loss
+        # than baseline standalone, task performance statistically unchanged). Override via
+        # env var F450_LAMBDA_ACTION_MAG if a specific job needs 0.0 (inert) or another
+        # value without touching this file.
+        "lambda_action_mag": float(os.environ.get("F450_LAMBDA_ACTION_MAG", 0.04)),
         "action_mag_nu": 2.0,
     }
 
