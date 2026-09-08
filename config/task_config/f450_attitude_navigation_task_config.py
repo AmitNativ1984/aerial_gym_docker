@@ -212,6 +212,48 @@ class task_config:
         # config is shared -- other training jobs may already be running against it).
         "lambda_jerk": float(os.environ.get("F450_LAMBDA_JERK", -0.01)),
 
+        # --- R1: rectified heading ---
+        # r_heading = lambda_b * dot(n, v_hat) is a PER-STEP tax on any motion away from
+        # the target: -lambda_b every step of a retreat. Backing 40 steps out of a
+        # cul-de-sac costs -4 against an arrive bonus of 10-15, so escaping a dead zone is
+        # irrational under it. r_progress does NOT have this problem -- it telescopes to
+        # lambda_p * (d_start - d_end), so detours are already free there.
+        #
+        # Rectifying to lambda_b * max(0, cos) keeps the early-training gradient (before
+        # the agent ever reaches a target, r_progress alone is a weak signal) while making
+        # a detour cost only the FOREGONE bonus, not an active penalty. Goal-seeking then
+        # rests on r_progress + the arrive bonus + gamma discounting, which is enough.
+        #
+        # 0 (off, the pre-R1 behaviour) by default. Set F450_HEADING_RECTIFY=1 to enable.
+        "heading_rectify": bool(int(os.environ.get("F450_HEADING_RECTIFY", 0))),
+
+        # --- R2: look-where-you-are-going ---
+        # lambda_look * max(0, v_x / ||v||), vehicle frame.
+        #
+        # This is the ONLY term in which yaw appears with a positive sign. r_heading
+        # cannot serve that purpose: n and v are both rotated by the same yaw-only
+        # robot_vehicle_orientation, so dot(n, v_hat) is yaw-INVARIANT and carries exactly
+        # zero yaw information (see base_multirotor.py:290). Yaw otherwise appears only
+        # inside p_jerk and p_action_mag, i.e. as pure cost -- a policy that never yaws is
+        # behaving optimally, which is why it beelines.
+        #
+        # The vehicle frame is yaw-aligned, so v_x / ||v|| IS the cosine between the
+        # drone's heading (== the fixed forward camera's boresight) and its velocity. So
+        # this pays for putting the flight direction inside the 87 x 56 deg FOV, which is
+        # also the obstacle-avoidance argument: under attitude control the quad strafes
+        # freely and can currently fly sideways into unseen space at no cost.
+        #
+        # Deliberately velocity-relative, NOT target-relative: a drone backing out of a
+        # dead end is rewarded for yawing to face its RETREAT. The escape behaviour falls
+        # out of the same term that fixes the beeline.
+        #
+        # 0.0 (inert) by default.
+        "lambda_look": float(os.environ.get("F450_LAMBDA_LOOK", 0.0)),
+        # Below this speed the velocity direction is numerically meaningless (v_hat is
+        # dominated by the estimator noise floor, vel_noise_std = 0.05 m/s) and rewarding
+        # alignment to it would be rewarding noise. Hovering earns no look bonus.
+        "look_min_speed": 0.3,  # m/s
+
         # B3/B4 experiment: bounded action-MAGNITUDE penalty, NTNU-style saturating shape
         # lambda_action_mag * (exp(-||a/action_scale||^2 / action_mag_nu) - 1) -- see
         # task/attitude_navigation_task.py's reward function for the implementation.
