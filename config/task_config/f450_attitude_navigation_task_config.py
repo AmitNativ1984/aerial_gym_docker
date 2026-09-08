@@ -217,7 +217,7 @@ class task_config:
         # task/attitude_navigation_task.py's reward function for the implementation.
         # Unlike p_jerk (unbounded linear, penalizes CHANGE), this penalizes MAGNITUDE
         # and saturates, so it can never dominate the loss the way an unbounded term
-        # could. 0.0 by default (inert; identical to not having the term at all).
+        # could.
         # action_mag_nu is a SHAPE constant, not meant to be swept: pinned so the term
         # evaluates to ~-0.025 (~30% of r_heading's measured EMA of +0.0838) at the
         # ep_1800/level-0 measured operating point (combined clamped-action L2 norm
@@ -228,7 +228,13 @@ class task_config:
         # much smaller penalty (0.04 * (exp(-0.245)-1) = -0.0087) -- saturating, not
         # linear, so it discourages high sustained magnitude without cratering reward
         # for a policy that occasionally needs a large but brief command.
-        "lambda_action_mag": float(os.environ.get("F450_LAMBDA_ACTION_MAG", 0.0)),
+        #
+        # PROMOTED TO DEFAULT from the smoothness/saturation B-series: 0.04, B3's isolated
+        # value, held up combined with bounds_loss_coef=0.01 in B4 (6.6x lower bounds_loss
+        # than baseline standalone, task performance statistically unchanged). Override via
+        # env var F450_LAMBDA_ACTION_MAG if a specific job needs 0.0 (inert) or another
+        # value without touching this file.
+        "lambda_action_mag": float(os.environ.get("F450_LAMBDA_ACTION_MAG", 0.04)),
         "action_mag_nu": 2.0,
     }
 
