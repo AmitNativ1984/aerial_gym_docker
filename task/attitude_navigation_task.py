@@ -335,7 +335,7 @@ class NavigationWithObstaclesTask(BaseTask):
         # last step's values, so we use an EMA to smooth across steps.
         self._reward_comp_ema = {
             "r_heading": 0.0, "r_progress": 0.0, "p_speed": 0.0, "p_jerk": 0.0,
-            "p_action_mag": 0.0,
+            "p_action_mag": 0.0, "r_look": 0.0,
         }
         self._ema_alpha = 0.02  # smooth over ~50 steps
 
@@ -942,6 +942,7 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["reward/p_speed"] = self._reward_comp_ema["p_speed"]
         self.infos["reward/p_jerk"] = self._reward_comp_ema["p_jerk"]
         self.infos["reward/p_action_mag"] = self._reward_comp_ema["p_action_mag"]
+        self.infos["reward/r_look"] = self._reward_comp_ema["r_look"]
 
         # Episode-end distance to target. Only refreshed on steps where something ended,
         # so the cached value carries between those steps.
@@ -1309,6 +1310,13 @@ class NavigationWithObstaclesTask(BaseTask):
         5. p_action_mag: lambda_action_mag * (exp(-||a_curr/action_scale||^2 / nu) - 1)
                        - PENALIZE action MAGNITUDE (not change), bounded/saturating.
                          0.0 by default (inert) -- see config for the B3 experiment.
+        6. r_look:     lambda_look * max(0, v_x/||v||) for ||v|| > look_min_speed
+                       - REWARDS pointing the (fixed, forward) camera along the
+                         direction of travel. The ONLY term in which yaw appears
+                         with a positive sign: r_bearing is yaw-invariant (n and v
+                         share the yaw-only vehicle frame), and yaw otherwise enters
+                         only through p_jerk and p_action_mag, as cost.
+                         0.0 by default (inert) -- see config.
 
         Args:
             mask: Boolean tensor indicating which envs get this reward
@@ -1325,7 +1333,15 @@ class NavigationWithObstaclesTask(BaseTask):
         n, _ = self._direction_and_distance_to_target()  # current-step, vehicle frame
         v = self.obs_dict["robot_vehicle_linvel"]           # current-step, vehicle frame
 
-        r_bearing = params["lambda_b"] *  torch.linalg.vecdot(n, v / (torch.linalg.norm(v, dim=1, keepdim=True) + 1e-6), dim=1)
+        speed_now = torch.linalg.norm(v, dim=1)
+        v_hat = v / (speed_now.unsqueeze(1) + 1e-6)
+        cos_bearing = torch.linalg.vecdot(n, v_hat, dim=1)
+        # R1: max(0, cos) removes the per-step tax on retreating without removing the
+        # reward for approaching. See the config for why the tax is the thing blocking
+        # dead-zone escape.
+        if params["heading_rectify"]:
+            cos_bearing = torch.clamp(cos_bearing, min=0.0)
+        r_bearing = params["lambda_b"] * cos_bearing
 
         # 2. Reward progress towards target: λ_p * (prev_dist - current_dist).
         # current_dist MUST be in the same units as self.prev_dist (raw meters,
@@ -1361,12 +1377,26 @@ class NavigationWithObstaclesTask(BaseTask):
             torch.exp(-action_mag_sq / params["action_mag_nu"]) - 1.0
         )
 
+        # 6. R2: look-where-you-are-going. The vehicle frame is yaw-aligned, so v_hat[:, 0]
+        # is the cosine between the drone's heading -- and therefore the fixed forward
+        # camera's boresight -- and its direction of travel. Rectified so that flying
+        # backwards is merely unrewarded rather than penalized: a retreat out of a dead
+        # end must stay affordable (that is the whole point of R1), and this term is here
+        # to make the drone TURN INTO the retreat, not to tax it for retreating.
+        # Speed-gated because v_hat is noise-dominated near hover. Inert at lambda_look=0.
+        r_look = (
+            params["lambda_look"]
+            * torch.clamp(v_hat[:, 0], min=0.0)
+            * (speed_now > params["look_min_speed"]).float()
+        )
+
         # Apply mask to zero out rewards for envs that had terminal events
         r_bearing = r_bearing[mask]
         r_progress = r_progress[mask]
         p_speed = p_speed[mask]
         p_jerk = p_jerk[mask]
         p_action_mag = p_action_mag[mask]
+        r_look = r_look[mask]
 
         # Update EMA for tensorboard reward component logging.
         # Guarded: when every env terminates on the same step the mask is empty, and
@@ -1380,5 +1410,6 @@ class NavigationWithObstaclesTask(BaseTask):
             self._reward_comp_ema["p_speed"] += a * (float(p_speed.mean()) - self._reward_comp_ema["p_speed"])
             self._reward_comp_ema["p_jerk"] += a * (float(p_jerk.mean()) - self._reward_comp_ema["p_jerk"])
             self._reward_comp_ema["p_action_mag"] += a * (float(p_action_mag.mean()) - self._reward_comp_ema["p_action_mag"])
+            self._reward_comp_ema["r_look"] += a * (float(r_look.mean()) - self._reward_comp_ema["r_look"])
 
-        return r_bearing + r_progress + p_speed + p_jerk + p_action_mag
+        return r_bearing + r_progress + p_speed + p_jerk + p_action_mag + r_look
