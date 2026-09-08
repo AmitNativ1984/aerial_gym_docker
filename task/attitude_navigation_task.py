@@ -335,6 +335,7 @@ class NavigationWithObstaclesTask(BaseTask):
         # last step's values, so we use an EMA to smooth across steps.
         self._reward_comp_ema = {
             "r_heading": 0.0, "r_progress": 0.0, "p_speed": 0.0, "p_jerk": 0.0,
+            "p_action_mag": 0.0,
         }
         self._ema_alpha = 0.02  # smooth over ~50 steps
 
@@ -940,6 +941,7 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["reward/r_progress"] = self._reward_comp_ema["r_progress"]
         self.infos["reward/p_speed"] = self._reward_comp_ema["p_speed"]
         self.infos["reward/p_jerk"] = self._reward_comp_ema["p_jerk"]
+        self.infos["reward/p_action_mag"] = self._reward_comp_ema["p_action_mag"]
 
         # Episode-end distance to target. Only refreshed on steps where something ended,
         # so the cached value carries between those steps.
@@ -1304,6 +1306,9 @@ class NavigationWithObstaclesTask(BaseTask):
                        - PENALIZE large changes in the (transformed) action, with each
                          channel normalized by its own command range so thrust, roll,
                          pitch and yaw_rate all weigh equally
+        5. p_action_mag: lambda_action_mag * (exp(-||a_curr/action_scale||^2 / nu) - 1)
+                       - PENALIZE action MAGNITUDE (not change), bounded/saturating.
+                         0.0 by default (inert) -- see config for the B3 experiment.
 
         Args:
             mask: Boolean tensor indicating which envs get this reward
@@ -1345,11 +1350,23 @@ class NavigationWithObstaclesTask(BaseTask):
             (a_curr - a_prev) / self._action_scale, dim=1
         )
 
+        # 5. B3: bounded action-MAGNITUDE penalty (saturating, NOT the unbounded linear
+        # shape p_jerk uses). a_curr / _action_scale recovers the dimensionless clamped
+        # command (== clamp(mu, -1, 1) per channel, since action_transformation_function
+        # is exactly this scaling in reverse) -- same normalization convention as p_jerk,
+        # applied to MAGNITUDE instead of CHANGE. lambda_action_mag defaults to 0.0 (see
+        # config): inert unless explicitly enabled. See config file for the nu pinning.
+        action_mag_sq = torch.linalg.norm(a_curr / self._action_scale, dim=1).pow(2)
+        p_action_mag = params["lambda_action_mag"] * (
+            torch.exp(-action_mag_sq / params["action_mag_nu"]) - 1.0
+        )
+
         # Apply mask to zero out rewards for envs that had terminal events
         r_bearing = r_bearing[mask]
         r_progress = r_progress[mask]
         p_speed = p_speed[mask]
         p_jerk = p_jerk[mask]
+        p_action_mag = p_action_mag[mask]
 
         # Update EMA for tensorboard reward component logging.
         # Guarded: when every env terminates on the same step the mask is empty, and
@@ -1362,5 +1379,6 @@ class NavigationWithObstaclesTask(BaseTask):
             self._reward_comp_ema["r_progress"] += a * (float(r_progress.mean()) - self._reward_comp_ema["r_progress"])
             self._reward_comp_ema["p_speed"] += a * (float(p_speed.mean()) - self._reward_comp_ema["p_speed"])
             self._reward_comp_ema["p_jerk"] += a * (float(p_jerk.mean()) - self._reward_comp_ema["p_jerk"])
+            self._reward_comp_ema["p_action_mag"] += a * (float(p_action_mag.mean()) - self._reward_comp_ema["p_action_mag"])
 
-        return r_bearing + r_progress + p_speed + p_jerk
+        return r_bearing + r_progress + p_speed + p_jerk + p_action_mag

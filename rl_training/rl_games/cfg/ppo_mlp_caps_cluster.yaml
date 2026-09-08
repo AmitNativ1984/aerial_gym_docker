@@ -1,0 +1,108 @@
+params:
+  seed: 42
+  algo:
+    name: a2c_caps                # agents/a2c_caps_agent.py: PPO + CAPS spatial smoothness
+
+  model:
+    name: continuous_a2c_logstd
+
+  load_checkpoint: False
+
+  network:
+    name: mlp_actor_critic
+    separate: True
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True
+    actor:
+      hidden_dims: [256, 256, 64]
+      activation: elu
+    critic:
+      hidden_dims: [256, 256, 64]
+      activation: elu
+
+  config:
+    name: f450_navigation
+    env_name: f450_navigation_task
+    env_config:
+      headless: True
+      use_warp: True
+
+    # Reward scaling
+    reward_shaper:
+      scale_value: 1.0
+
+    # PPO settings
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    ppo: True
+
+    learning_rate: 1e-4
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+
+    # Training params
+    save_best_after: 10
+    save_frequency: 50
+    score_to_win: 100000
+    grad_norm: 1.0
+    entropy_coef: 0.001
+    truncate_grads: True
+    e_clip: 0.2
+    clip_value: False
+
+    # Batch settings -- unchanged from ppo_mlp_cluster.yaml, see that file's comments
+    num_actors: 1024
+    horizon_length: 128
+    minibatch_size: 8192
+    mini_epochs: 4
+    seq_length: 8
+
+    # Value function
+    critic_coef: 2
+    normalize_value: True
+    value_bootstrap: True
+
+    # Input normalization
+    normalize_input: True
+
+    bounds_loss_coef: 0.001
+    max_epochs: 8000
+    use_diagnostics: True
+
+    # --- CAPS spatial smoothness (agents/a2c_caps_agent.py) -----------------------
+    # L_S = || mu(s) - mu(s + eps) ||^2, eps ~ N(0, sigma^2) in NORMALIZED obs space.
+    #
+    # UNTESTED starting point, not tuned: lambda_s chosen so that at the measured
+    # ep_1800 operating point (pre-clamp sensitivity ~0.17-0.22 per channel, see the
+    # A2 diagnostic run) caps_s_loss ~ O(0.1-0.3), putting lambda_s * caps_s_loss in
+    # the same order of magnitude as r_heading's EMA (+0.0838) -- i.e. comparably
+    # weighted to the dominant existing reward term, not dominant over it. Re-derive
+    # once real caps/spatial_loss values are on the board (logged to
+    # TensorBoard/W&B every minibatch).
+    #
+    # DO NOT launch a full run with this before the A1 noise-vs-reward ablation
+    # (analysis/measure_erratic.py with state_estimation_noise.enable=False and
+    # gazebo_imu_config.enable_noise/enable_bias=False) has run. If A1 shows the
+    # erraticness survives with noise off, this term has the right mechanism to
+    # help; if A1 shows it collapses with noise off, this term is solving the wrong
+    # problem and the fix belongs on the observation side (filtering/recurrence)
+    # instead. See the smoothness/saturation plan for the full ordering.
+    caps:
+      lambda_s: 0.05
+      sigma: 0.1
+
+    # Player settings (for inference/testing)
+    player:
+      render: True
+      deterministic: True
+      games_num: 100000
+      num_actors: 1
