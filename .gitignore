@@ -5,3 +5,9 @@ __pycache__/
 slurm/.env
 slurm_logs/
 *.sqsh
+
+# Training run outputs (checkpoints, wandb, tensorboard) -- large binaries, never committed
+runs/
+
+# Raw analysis data dumps (CSV/JSON exports) -- ephemeral, not reviewable code
+analysis/data/

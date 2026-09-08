@@ -1,4 +1,5 @@
 import math
+import os
 import torch
 
 class task_config:
@@ -79,7 +80,23 @@ class task_config:
     # thrust is kept in [-1, 1] (controller maps it to [0, 2*m*g], hover at 0);
     # roll/pitch and yaw_rate are scaled to physical units below.
     max_inclination_angle_rad = math.pi / 4  # max roll/pitch (45 deg, symmetric: [-max, +max])
-    max_yaw_rate = math.pi / 3               # rad/s (~60 deg/s, symmetric: [-max, +max])
+    # ~60 deg/s by default. B5 experiment: override via env var F450_MAX_YAW_RATE_DEG (degrees,
+    # converted below) to sweep without touching this file for other runs.
+    #
+    # *** CONTRACT WARNING ***: max_yaw_rate (with max_inclination_angle_rad) is a
+    # training<->flight contract, asserted equal to BasePolicy.max_yaw_rate_rad_s in the
+    # external sail-uav-core repo by tests/test_deploy_nav_obs_parity.py:379-380. A checkpoint
+    # trained with this overridden is NOT deployable without a coordinated change to
+    # sail-uav-core's BasePolicy. It also silently renormalizes p_jerk's _action_scale
+    # (task/attitude_navigation_task.py:207-213) -- changing this is never a single-variable
+    # change in the strict sense, it moves two things at once.
+    #
+    # Raising this ALONE (from scratch, no other reward/loss change) was already tried and
+    # falsified: the policy just scaled its demand proportionally (84->236 deg/s) and stayed
+    # ~66% clamped -- bounds_loss was too weak (0.001) to stop it. B5 pairs this with B4's
+    # bounds_loss_coef=0.01 specifically to test whether that mechanism, absent last time,
+    # prevents the same runaway.
+    max_yaw_rate = math.radians(float(os.environ.get("F450_MAX_YAW_RATE_DEG", 60.0)))  # rad/s
     v_max = 5.0  # Speed threshold for excess speed penalty (m/s)
 
     # --- OBSERVATIONS ---
@@ -190,7 +207,29 @@ class task_config:
         "lambda_p": 0.5,           # Rewards closing distance to target (encourage progress)
 
         "lambda_v": -0.1,         # Penlizes velocity above v_max (encourage speed control for safety)
-        "lambda_jerk": -0.01,      # Penalty on jerk (change in acceleration) to encourage smooth control
+        # -0.01 by default. B2 experiment (smoothness/saturation plan): override via
+        # env var F450_LAMBDA_JERK to sweep without touching this file (this task
+        # config is shared -- other training jobs may already be running against it).
+        "lambda_jerk": float(os.environ.get("F450_LAMBDA_JERK", -0.01)),
+
+        # B3/B4 experiment: bounded action-MAGNITUDE penalty, NTNU-style saturating shape
+        # lambda_action_mag * (exp(-||a/action_scale||^2 / action_mag_nu) - 1) -- see
+        # task/attitude_navigation_task.py's reward function for the implementation.
+        # Unlike p_jerk (unbounded linear, penalizes CHANGE), this penalizes MAGNITUDE
+        # and saturates, so it can never dominate the loss the way an unbounded term
+        # could. 0.0 by default (inert; identical to not having the term at all).
+        # action_mag_nu is a SHAPE constant, not meant to be swept: pinned so the term
+        # evaluates to ~-0.025 (~30% of r_heading's measured EMA of +0.0838) at the
+        # ep_1800/level-0 measured operating point (combined clamped-action L2 norm
+        # ~1.4, from analysis/measure_erratic.py's per-channel mean|mu| at that
+        # checkpoint) when lambda_action_mag=0.04:
+        #   exp(-1.4^2 / 2.0) - 1 = exp(-0.98) - 1 = -0.625;  0.04 * -0.625 = -0.025
+        # A well-behaved low-magnitude policy (combined norm ~0.7, ep_50-era) gets a
+        # much smaller penalty (0.04 * (exp(-0.245)-1) = -0.0087) -- saturating, not
+        # linear, so it discourages high sustained magnitude without cratering reward
+        # for a policy that occasionally needs a large but brief command.
+        "lambda_action_mag": float(os.environ.get("F450_LAMBDA_ACTION_MAG", 0.0)),
+        "action_mag_nu": 2.0,
     }
 
 
