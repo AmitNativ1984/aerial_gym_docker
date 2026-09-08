@@ -334,8 +334,8 @@ class NavigationWithObstaclesTask(BaseTask):
         # IsaacAlgoObserver overwrites direct_info each step and only logs the
         # last step's values, so we use an EMA to smooth across steps.
         self._reward_comp_ema = {
-            "r_heading": 0.0, "r_progress": 0.0, "p_speed": 0.0, "p_jerk": 0.0,
-            "p_action_mag": 0.0,
+            "r_progress": 0.0, "p_speed": 0.0, "p_jerk": 0.0,
+            "p_action_mag": 0.0, "p_blind": 0.0,
         }
         self._ema_alpha = 0.02  # smooth over ~50 steps
 
@@ -937,11 +937,11 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["metrics/obstacle_intensity"] = float(self.obs_dict["obstacle_intensity"])
 
         # Reward components (EMA across steps, horizon-independent)
-        self.infos["reward/r_heading"] = self._reward_comp_ema["r_heading"]
         self.infos["reward/r_progress"] = self._reward_comp_ema["r_progress"]
         self.infos["reward/p_speed"] = self._reward_comp_ema["p_speed"]
         self.infos["reward/p_jerk"] = self._reward_comp_ema["p_jerk"]
         self.infos["reward/p_action_mag"] = self._reward_comp_ema["p_action_mag"]
+        self.infos["reward/p_blind"] = self._reward_comp_ema["p_blind"]
 
         # Episode-end distance to target. Only refreshed on steps where something ended,
         # so the cached value carries between those steps.
@@ -1291,24 +1291,27 @@ class NavigationWithObstaclesTask(BaseTask):
         flight stability and safety.
 
         Components (the total reward is their sum):
-        1. r_bearing:  lambda_b * dot(unit_vec_to_target, unit_vec_velocity)
-                       - REWARDS flying toward the target (cosine of the angle
-                         between the velocity and the direction to the target)
-        2. r_progress: lambda_p * (prev_dist - current_dist)
+        1. r_progress: lambda_p * (prev_dist - current_dist)
                        - REWARDS closing distance to the target this step
-                         (both distances in raw meters)
-        3. p_speed:    lambda_v * v * max(0, v - v_max)
+                         (both distances in raw meters). Telescopes over an episode
+                         to lambda_p * (d_start - d_end), so it is path-INDEPENDENT: a
+                         detour costs only the gamma-discounting of the arrive bonus,
+                         never a direct penalty. This is what carries goal-seeking now
+                         that r_bearing is gone.
+        2. p_speed:    lambda_v * v * max(0, v - v_max)
                        - PENALIZE 3D linear speed above v_max. v is the full
                          (vx, vy, vz) vehicle-frame velocity, so climbs and dives
                          count the same as forward flight. Yaw rate is NOT
                          penalized here -- only linear velocity.
-        4. p_jerk:     lambda_jerk * ||(a_curr - a_prev) / action_scale||
+        3. p_jerk:     lambda_jerk * ||(a_curr - a_prev) / action_scale||
                        - PENALIZE large changes in the (transformed) action, with each
                          channel normalized by its own command range so thrust, roll,
                          pitch and yaw_rate all weigh equally
-        5. p_action_mag: lambda_action_mag * (exp(-||a_curr/action_scale||^2 / nu) - 1)
+        4. p_action_mag: lambda_action_mag * (exp(-||a_curr/action_scale||^2 / nu) - 1)
                        - PENALIZE action MAGNITUDE (not change), bounded/saturating.
-                         0.0 by default (inert) -- see config for the B3 experiment.
+        5. p_blind:    -lambda_blind * horizontal_speed * misalignment^2
+                       - PENALIZE speed that is not going where the camera points.
+                         The ONLY term carrying yaw information at all; see below.
 
         Args:
             mask: Boolean tensor indicating which envs get this reward
@@ -1317,31 +1320,26 @@ class NavigationWithObstaclesTask(BaseTask):
         """
         params = self.task_config.reward_parameters
 
-        # 1. Reward heading towards target: λ_b * dot(unit_vec_to_target, unit_vec_velocity)
-        # Compute n/v from the current-step state (NOT task_obs["observations"],
-        # which is only refreshed after compute_rewards in step() and would be one
-        # step stale). The helper is the same source process_obs_for_task uses for
-        # observations[:, 0:3]; robot_vehicle_linvel is the source for [:, 4:7].
-        n, _ = self._direction_and_distance_to_target()  # current-step, vehicle frame
-        v = self.obs_dict["robot_vehicle_linvel"]           # current-step, vehicle frame
+        # Current-step vehicle-frame velocity (NOT task_obs["observations"], which is
+        # only refreshed after compute_rewards in step() and would be one step stale).
+        # This is the same source process_obs_for_task uses for observations[:, 4:7].
+        v = self.obs_dict["robot_vehicle_linvel"]
 
-        r_bearing = params["lambda_b"] *  torch.linalg.vecdot(n, v / (torch.linalg.norm(v, dim=1, keepdim=True) + 1e-6), dim=1)
-
-        # 2. Reward progress towards target: λ_p * (prev_dist - current_dist).
+        # 1. Reward progress towards target: λ_p * (prev_dist - current_dist).
         # current_dist MUST be in the same units as self.prev_dist (raw meters,
         # see step()/reset_idx). Compute it from positions here rather than using
         # observations[:, 3], which is normalized by the env diagonal to [0, 1].
         current_dist = self._get_dist_to_target()
         r_progress = params["lambda_p"] * (self.prev_dist - current_dist)
         
-        # 3. Excess speed penalty: λ_v * v * max(0, v - v_max).
+        # 2. Excess speed penalty: λ_v * v * max(0, v - v_max).
         # Full 3D linear speed (vx, vy, vz) -- intentional, not just horizontal.
         speed = torch.linalg.norm(v, dim=1)
         p_speed = params["lambda_v"] * speed * torch.clamp(
             speed - self.task_config.v_max, min=0.0
         )
 
-        # 4. Penalize jerk (change in the transformed action), per-channel normalized by
+        # 3. Penalize jerk (change in the transformed action), per-channel normalized by
         # each channel's own command range so the norm is dimensionless -- see
         # self._action_scale in __init__ for why the raw difference would not be.
         a_curr = current_action
@@ -1350,7 +1348,7 @@ class NavigationWithObstaclesTask(BaseTask):
             (a_curr - a_prev) / self._action_scale, dim=1
         )
 
-        # 5. B3: bounded action-MAGNITUDE penalty (saturating, NOT the unbounded linear
+        # 4. B3: bounded action-MAGNITUDE penalty (saturating, NOT the unbounded linear
         # shape p_jerk uses). a_curr / _action_scale recovers the dimensionless clamped
         # command (== clamp(mu, -1, 1) per channel, since action_transformation_function
         # is exactly this scaling in reverse) -- same normalization convention as p_jerk,
@@ -1361,12 +1359,49 @@ class NavigationWithObstaclesTask(BaseTask):
             torch.exp(-action_mag_sq / params["action_mag_nu"]) - 1.0
         )
 
+        # 5. Penalize motion the camera cannot see.
+        #
+        # The vehicle frame is yaw-only (base_multirotor.py:290 zeroes roll and pitch
+        # before rebuilding the quat), so v[:, 0] / ||v_xy|| is exactly the cosine
+        # between the drone's nose -- and hence the fixed forward camera's boresight,
+        # mounted at [0.10, 0, -0.03] with zero relative rotation -- and the horizontal
+        # direction of travel. This is the ONLY term in the reward that carries yaw
+        # information: the deleted r_bearing could not (n and v shared the same yaw-only
+        # frame, so the rotation cancelled in the dot product), and yaw otherwise appears
+        # only inside p_jerk and p_action_mag, as cost.
+        #
+        # v_z is excluded DELIBERATELY. Yaw cannot correct vertical blindness, so
+        # including it would hand the yaw channel a gradient it cannot act on and push
+        # the cost onto pitch -- which is the channel needed to accelerate. Vertical
+        # blindness belongs to a depth-derived clearance term, not to this one.
+        #
+        # Squared, not linear: (1 - cos) alone is quadratic near boresight and still
+        # charges for a misalignment that leaves the obstacle mid-frame. Squaring makes
+        # it quartic -- 10 deg costs 0.02% of maximum rather than 1.5% -- which is the
+        # soft deadzone, with no hard corner for the policy to park against. A saturating
+        # exponential was rejected instead: exp(-(theta/nu)^p) has ~zero gradient beyond
+        # ~2*nu, and at init yaw is uncorrelated with velocity (median misalignment
+        # 90 deg), so the policy would start in the region where such a shape teaches
+        # nothing.
+        #
+        # Scaling by horizontal_speed makes hover free (yaw all you like at rest) and
+        # committed sideways flight expensive, which is the real risk gradient. For a
+        # dead end this means: reversing out blind costs the maximum, yawing round and
+        # flying out costs nothing, and the cheapest escape is slow -> yaw -> accelerate.
+        # No stall detector needed; it falls out of the shape.
+        #
+        # The 1e-6 guards a pure vertical climb, where v_x = v_y = 0. misalignment is
+        # bounded to [0, 1] without a clamp, since |v_x| <= ||v_xy|| exactly.
+        horizontal_speed = torch.linalg.norm(v[:, :2], dim=1)
+        misalignment = 0.5 * (1.0 - v[:, 0] / (horizontal_speed + 1e-6))
+        p_blind = -params["lambda_blind"] * horizontal_speed * misalignment.pow(2)
+
         # Apply mask to zero out rewards for envs that had terminal events
-        r_bearing = r_bearing[mask]
         r_progress = r_progress[mask]
         p_speed = p_speed[mask]
         p_jerk = p_jerk[mask]
         p_action_mag = p_action_mag[mask]
+        p_blind = p_blind[mask]
 
         # Update EMA for tensorboard reward component logging.
         # Guarded: when every env terminates on the same step the mask is empty, and
@@ -1375,10 +1410,10 @@ class NavigationWithObstaclesTask(BaseTask):
         # step just holds the last value, which is what an EMA should do with no data.
         if mask.any():
             a = self._ema_alpha
-            self._reward_comp_ema["r_heading"] += a * (float(r_bearing.mean()) - self._reward_comp_ema["r_heading"])
             self._reward_comp_ema["r_progress"] += a * (float(r_progress.mean()) - self._reward_comp_ema["r_progress"])
             self._reward_comp_ema["p_speed"] += a * (float(p_speed.mean()) - self._reward_comp_ema["p_speed"])
             self._reward_comp_ema["p_jerk"] += a * (float(p_jerk.mean()) - self._reward_comp_ema["p_jerk"])
             self._reward_comp_ema["p_action_mag"] += a * (float(p_action_mag.mean()) - self._reward_comp_ema["p_action_mag"])
+            self._reward_comp_ema["p_blind"] += a * (float(p_blind.mean()) - self._reward_comp_ema["p_blind"])
 
-        return r_bearing + r_progress + p_speed + p_jerk + p_action_mag
+        return r_progress + p_speed + p_jerk + p_action_mag + p_blind

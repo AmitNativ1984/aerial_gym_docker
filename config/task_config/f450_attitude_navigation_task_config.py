@@ -203,7 +203,31 @@ class task_config:
         "d_min": 0.4,                   # arrival distance threshold (meters)
         
         # Progress reward (dense shaping)
-        "lambda_b": 0.1,          # Rewards velocity in target direction (encourage movement towards target)
+        #
+        # r_bearing (lambda_b * dot(n, v_hat)) WAS here and has been REMOVED. It measured
+        # +0.0842 EMA at B4, i.e. 12.97 of the 25.00 per-episode return -- more than the
+        # whole arrive bonus contribution (12.22) and 2.9x r_progress. It was not shaping,
+        # it was the objective, and what it paid for was pointing the velocity vector at
+        # the goal. Against it, colliding cost 1.81/episode: the reward was offering 7:1
+        # odds in favour of beelining and eating the crashes.
+        #
+        # It was also incapable of doing the one job its name implies. n and v are both
+        # rotated by the SAME yaw-only robot_vehicle_orientation (base_multirotor.py:290),
+        # so the yaw cancels in the dot product and the term carried exactly zero yaw
+        # information -- see p_blind in the task's reward function, which replaces it.
+        #
+        # Deleted rather than zeroed: a zero-weight term is a live footgun, and the
+        # per-step directional tax it applied (-lambda_b on every step of a retreat) is
+        # precisely what made backing out of a dead end irrational.
+        #
+        # lambda_p is UNCHANGED at 0.5, deliberately. Raising it to absorb the freed dense
+        # budget was considered and rejected: r_progress's toward-vs-away differential is
+        # 2*lambda_p*speed*dt, which at lambda_p=1.75 and 3 m/s is 0.315/step -- LARGER
+        # than the 0.200/step differential of the r_heading being removed. That would have
+        # reintroduced a bigger directional tax than the one deleted. Return magnitude does
+        # not need preserving; goal-seeking is carried by the arrive bonus and gamma
+        # discounting (0.99 at 33 Hz is a 3.0 s horizon against a 4.6 s episode, so a
+        # direct run beats wander-then-go by 2.73x on discounted return).
         "lambda_p": 0.5,           # Rewards closing distance to target (encourage progress)
 
         "lambda_v": -0.1,         # Penlizes velocity above v_max (encourage speed control for safety)
@@ -236,6 +260,28 @@ class task_config:
         # value without touching this file.
         "lambda_action_mag": float(os.environ.get("F450_LAMBDA_ACTION_MAG", 0.04)),
         "action_mag_nu": 2.0,
+
+        # --- p_blind: motion the camera cannot see ---
+        # -lambda_blind * horizontal_speed * ((1 - forward/horizontal_speed) / 2)^2
+        #
+        # The ONLY term in which yaw appears at all, positively or negatively. With
+        # r_bearing gone, yaw would otherwise enter the reward solely through p_jerk and
+        # p_action_mag -- as cost, never as benefit -- so a policy that refuses to yaw
+        # would be behaving optimally. That is why the drone never yaws today.
+        #
+        # SIZING. Coupled to lambda_p through the requirement that faster is always
+        # better: forward motion stays profitable iff lambda_blind * misalignment^2 <
+        # lambda_p * dt (dt = sim dt 0.01 * 3 substeps = 0.03 s), i.e. < 0.015. At the
+        # 3/8 expected misalignment^2 of a yaw-uncorrelated policy -- which is what we
+        # have, nothing having ever paid it to yaw -- 0.03 * 0.375 = 0.01125 clears that,
+        # so there is no slow-down incentive at the starting operating point. It only
+        # starts favouring "slow down" past 90 deg off-nose, where slowing and yawing is
+        # the wanted behaviour anyway.
+        #
+        # Projected worth: -5.2/episode untrained, -0.7 once yaw is learned, so ~4.5
+        # points of headroom on an 11.4-point achievable return. Large enough to find,
+        # not large enough to displace the task.
+        "lambda_blind": float(os.environ.get("F450_LAMBDA_BLIND", 0.03)),
     }
 
 
